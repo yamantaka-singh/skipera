@@ -44,11 +44,11 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       itemId: itemId,
       settings: request.settings
     }, response => {
-      sendResponse({ status: response?.status || "Background quiz solver started." });
+      sendResponse({ status: response?.error || response?.status || "Background quiz solver started.", error: response?.error });
     });
       
     return true; // Keep channel open for async
-  } else if (request.action === "START_FULL_COURSE_SOLVER") {
+  } else if (request.action === "START_FULL_COURSE_SOLVER" || request.action === "START_VIDEOS_ONLY") {
     if (state.isSolving) {
       sendResponse({ status: "Solver already running" });
       return true;
@@ -63,50 +63,20 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     }
     const slug = urlParts[learnIdx + 1];
 
+    const settings = {
+      ...(request.settings || {}),
+      videosOnly: request.action === "START_VIDEOS_ONLY" || request.settings?.videosOnly
+    };
+
     chrome.runtime.sendMessage({
       action: "RUN_FULL_COURSE",
       slug: slug,
-      settings: request.settings
+      settings: settings
     }, response => {
-      sendResponse({ status: response?.status || "Background orchestrator started." });
+      sendResponse({ status: response?.error || response?.status || "Background orchestrator started.", error: response?.error });
     });
     
-    return true;
-  } else if (request.action === "UPDATE_PROGRESS") {
-    showToast(request.message);
-    sendResponse({ status: "OK" });
     return true;
   }
   return true;
 });
-
-// Toast UI Logic
-let toastContainer = null;
-
-function showToast(message) {
-  if (!toastContainer) {
-    toastContainer = document.createElement('div');
-    toastContainer.id = "skipera-toast-container";
-    document.body.appendChild(toastContainer);
-  }
-  
-  const toast = document.createElement('div');
-  toast.className = "skipera-toast";
-  toast.textContent = message;
-  
-  toastContainer.appendChild(toast);
-  
-  // Animate in
-  setTimeout(() => toast.classList.add('show'), 10);
-  
-  // Remove after 5 seconds
-  setTimeout(() => {
-    toast.classList.remove('show');
-    setTimeout(() => {
-      if (toast.parentNode === toastContainer) {
-        toastContainer.removeChild(toast);
-      }
-    }, 300);
-  }, 5000);
-}
-
