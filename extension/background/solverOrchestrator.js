@@ -28,12 +28,14 @@ export async function runFullCourse(courseSlug, settings, tabId) {
   const apiKeyStr = settings?.apiKey || "";
   const keyList = apiKeyStr.split(",").map(k => k.trim()).filter(k => k);
   
+  const isAiSolver = !settings?.videosOnly && !!settings?.apiKey?.trim();
+  
   // Concurrency Guard: NVIDIA NIM free tier permits max 3 concurrent tasks per API key
-  if (provider === "nvidia") {
+  if (provider === "nvidia" && isAiSolver) {
     const maxAllowed = Math.max(1, keyList.length) * 3;
     let currentNvidiaRuns = 0;
     for (const [tId, run] of activeRuns.entries()) {
-      if (!run.isCancelled && (run.provider || "nvidia") === "nvidia") {
+      if (!run.isCancelled && (run.provider || "nvidia") === "nvidia" && run.isAiSolver) {
         currentNvidiaRuns++;
       }
     }
@@ -45,7 +47,7 @@ export async function runFullCourse(courseSlug, settings, tabId) {
     }
   }
   
-  const runContext = { courseSlug: safeSlug, provider, isCancelled: false };
+  const runContext = { courseSlug: safeSlug, provider, isCancelled: false, isAiSolver };
   if (tabId) {
     activeRuns.set(tabId, runContext);
   }
