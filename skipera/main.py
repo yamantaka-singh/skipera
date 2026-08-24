@@ -8,7 +8,7 @@ from .assessment.solver import GradedSolver
 from .discussion.solver import DiscussionPromptSolver
 from .coach.solver import CoachSolver
 from .watcher.watch import Watcher
-from .session_utils import get_csrf_headers, random_delay
+from .session_utils import get_csrf_headers
 
 
 class Skipera(object):
@@ -126,7 +126,7 @@ class Skipera(object):
                     sequential_items.append(item)
 
             if concurrent_items:
-                with ThreadPoolExecutor(max_workers=min(6, len(concurrent_items))) as executor:
+                with ThreadPoolExecutor(max_workers=min(10, len(concurrent_items))) as executor:
                     futures = {
                         executor.submit(self.process_item, item): item 
                         for item in concurrent_items

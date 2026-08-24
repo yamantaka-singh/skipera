@@ -38,7 +38,7 @@ The questions are in a dict format where each key represents the question id, an
 - 'Type': one of 'MULTIPLE_CHOICE', 'CHECKBOX', 'TEXT_REFLECT', 'NUMERIC', 'PLAIN_TEXT', 'TEXT_EXACT_MATCH', 'REGEX', 'FILE_UPLOAD', or 'URL'.
 - 'previous_attempts': (optional) past attempt results.
 
-CRITICAL: Always provide a step-by-step logical deduction in the 'reasoning' field before providing your final answer.
+CRITICAL: Keep 'reasoning' concise (1-2 sentences).
 
 Rules for each question type:
 1. MULTIPLE_CHOICE: Select exactly one option_id and place it in the 'chosen' list.
@@ -255,6 +255,7 @@ export async function triggerQuizSolver(courseId, itemId, settings, tabId, cours
     }
 
     // 3. Save Responses
+    console.log("[Skipera Solver] Saving answer responses payload:", JSON.stringify(answerResponses, null, 2));
     await fetchGraphQL("Submission_SaveResponses", SAVE_RESPONSES_QUERY, {
       input: { courseId, itemId, attemptId, questionResponses: answerResponses }
     });

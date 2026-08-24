@@ -1,4 +1,12 @@
-// llmProviders.js
+function parseJsonText(text) {
+  if (typeof text !== "string") return text;
+  const start = text.indexOf("{");
+  const end = text.lastIndexOf("}");
+  if (start !== -1 && end !== -1) {
+    text = text.slice(start, end + 1);
+  }
+  return JSON.parse(text);
+}
 
 const PROVIDER_CONFIGS = {
   nvidia: {
@@ -14,7 +22,7 @@ const PROVIDER_CONFIGS = {
         { role: "system", content: systemPrompt },
         { role: "user", content: userPrompt }
       ],
-      max_tokens: 2000,
+      max_tokens: 8192,
       temperature: 0.1,
       chat_template_kwargs: { enable_thinking: false },
       response_format: {
@@ -43,7 +51,7 @@ const PROVIDER_CONFIGS = {
         }
       }
     }),
-    parseResponse: (json) => JSON.parse(json.choices[0].message.content)
+    parseResponse: (json) => parseJsonText(json.choices[0].message.content)
   },
   openai: {
     endpoint: "https://api.openai.com/v1/chat/completions",
@@ -57,6 +65,7 @@ const PROVIDER_CONFIGS = {
         { role: "system", content: systemPrompt },
         { role: "user", content: userPrompt }
       ],
+      max_tokens: 8192,
       temperature: 0.1,
       response_format: {
         type: "json_schema",
@@ -87,7 +96,7 @@ const PROVIDER_CONFIGS = {
         }
       }
     }),
-    parseResponse: (json) => JSON.parse(json.choices[0].message.content)
+    parseResponse: (json) => parseJsonText(json.choices[0].message.content)
   },
   anthropic: {
     endpoint: "https://api.anthropic.com/v1/messages",
@@ -102,18 +111,10 @@ const PROVIDER_CONFIGS = {
       messages: [
         { role: "user", content: userPrompt + "\n\nPlease respond ONLY with a valid JSON object matching the requested schema." }
       ],
-      max_tokens: 2000,
+      max_tokens: 8192,
       temperature: 0.1,
     }),
-    parseResponse: (json) => {
-      let text = json.content[0].text;
-      const start = text.indexOf("{");
-      const end = text.lastIndexOf("}");
-      if (start !== -1 && end !== -1) {
-         text = text.slice(start, end + 1);
-      }
-      return JSON.parse(text);
-    }
+    parseResponse: (json) => parseJsonText(json.content[0].text)
   },
   gemini: {
     endpoint: (key) => "", 
@@ -125,10 +126,11 @@ const PROVIDER_CONFIGS = {
       contents: [{ parts: [{ text: userPrompt }] }],
       generationConfig: {
         temperature: 0.1,
+        maxOutputTokens: 8192,
         responseMimeType: "application/json",
       }
     }),
-    parseResponse: (json) => JSON.parse(json.candidates[0].content.parts[0].text)
+    parseResponse: (json) => parseJsonText(json.candidates[0].content.parts[0].text)
   }
 };
 
@@ -148,6 +150,8 @@ export async function callLLMProvider(providerName, apiKeys, modelName, systemPr
 
     const headers = provider.formatHeaders(key);
     const body = provider.formatBody(modelName, systemPrompt, userPrompt);
+
+    console.log("[Skipera LLM] Sending prompt:", { model: modelName, systemPrompt, userPrompt, body });
 
     try {
       const response = await fetch(endpoint, {
@@ -169,7 +173,10 @@ export async function callLLMProvider(providerName, apiKeys, modelName, systemPr
       }
 
       const json = await response.json();
-      return provider.parseResponse(json);
+      console.log("[Skipera LLM] Received raw response:", json);
+      const parsed = provider.parseResponse(json);
+      console.log("[Skipera LLM] Parsed response:", parsed);
+      return parsed;
 
     } catch (e) {
       if (attempt === apiKeys.length - 1) throw e;

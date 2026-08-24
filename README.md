@@ -8,8 +8,13 @@ Skipera assists in automatically skip irrelevant MOOC courses which are made man
 Many of such courses are allotted directly by the university as credit fillers and are not in the interest of the student. The progress of the completion of these courses is tracked by the university and credits are allotted.
 
 ## How?
-Skipera makes use of the Coursera web API and completes the videos + reading materials.
+Skipera uses the Coursera web API to fast-forward videos and reading materials.
 Graded assessments are completed with the assistance of an LLM API.
+
+### Features
+- **One-Click Fast-Forward:** Instant batch skipping of videos and reading materials.
+- **AI Quiz Solver:** Automatically solves graded quizzes and assessments via LLMs.
+- **Chrome/Edge Extension:** Full graphical dashboard directly in your browser.
 
 ## Installation
 
@@ -62,6 +67,15 @@ Where `course-slug` is from the Coursera URL. For example, if the URL is `https:
 ```bash
 skipera introduction-psychology
 ```
+
+## Browser Extension
+
+Skipera also includes a browser extension:
+
+1. Open `chrome://extensions/` in Chrome or Edge.
+2. Enable **Developer mode** (toggle in top-right).
+3. Click **Load unpacked** and select the `extension/` folder.
+4. Open the extension popup on any Coursera course page to skip materials or solve quizzes.
 
 ## LLM Support
 

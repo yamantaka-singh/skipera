@@ -1,7 +1,6 @@
-import { getUserId, getCourseMaterials, getCompletedItems, getVideoMetadata, watchVideo, readSupplement, completeWidget, completeLti, delay, fetchCoursera, getCsrfToken } from './courseraApi.js';
+import { getUserId, getCourseMaterials, getCompletedItems, skipLecture, readSupplement, completeWidget, completeLti, delay, fetchCoursera } from './courseraApi.js';
 import { triggerQuizSolver } from './quizSolver.js';
 import { callLLMProvider } from './llmProviders.js';
-
 import { updateDashboard } from './dashboardStore.js';
 
 export const activeRuns = new Map(); // tabId -> { courseSlug, isCancelled: false }
@@ -14,6 +13,39 @@ export function stopRunForTab(tabId) {
     updateDashboard("Process terminated (Tab was closed).", "error", run.courseSlug);
     activeRuns.delete(tabId);
     console.log(`[Skipera] Run terminated for tab ${tabId} (${run.courseSlug})`);
+  }
+}
+
+async function runConcurrent(items, limit, fn) {
+  const results = [];
+  const executing = new Set();
+  for (const item of items) {
+    const p = Promise.resolve().then(() => fn(item));
+    results.push(p);
+    executing.add(p);
+    const clean = () => executing.delete(p);
+    p.then(clean, clean);
+    if (executing.size >= limit) {
+      await Promise.race(executing);
+    }
+  }
+  return Promise.all(results);
+}
+
+async function processBatchableItem(item, userId, safeSlug, courseId, updateProgress) {
+  const type = item.contentSummary?.typeName;
+  if (type === "lecture") {
+    await skipLecture(userId, safeSlug, courseId, item);
+    updateProgress(`Completed lecture: ${item.name}`, "complete");
+  } else if (type === "supplement") {
+    await readSupplement(userId, courseId, item.id);
+    updateProgress(`Completed supplement: ${item.name}`, "complete");
+  } else if (type === "widget" || type === "gradedWidget" || type === "ungradedWidget") {
+    await completeWidget(userId, courseId, item.id);
+    updateProgress(`Completed widget: ${item.name}`, "complete");
+  } else if (type === "lti" || type === "gradedLti" || type === "ungradedLti") {
+    await completeLti(userId, courseId, item.id);
+    updateProgress(`Completed LTI: ${item.name}`, "complete");
   }
 }
 
@@ -58,7 +90,7 @@ export async function runFullCourse(courseSlug, settings, tabId) {
       if (msg.includes("Skipping") || msg.includes("No unlocked")) type = "skip";
       else if (msg.includes("ERROR") || msg.includes("Failed") || msg.includes("Error")) type = "error";
       else if (msg.includes("Complete") || msg.includes("successfully") || msg.includes("Passed")) type = "complete";
-      else if (msg.includes("Starting") || msg.includes("Processing") || msg.includes("Triggering")) type = "active";
+      else if (msg.includes("Starting") || msg.includes("Processing") || msg.includes("Triggering") || msg.includes("Fast-forwarding")) type = "active";
     }
     updateDashboard(msg, type, safeSlug);
   };
@@ -71,10 +103,11 @@ export async function runFullCourse(courseSlug, settings, tabId) {
     const initialMaterials = await getCourseMaterials(safeSlug);
     const courseId = initialMaterials.elements[0].id;
     
-    // We will loop continuously until we find no more uncompleted items
     let loopCount = 0;
     const skippedItems = new Set();
-    
+    const batchableTypes = new Set(["lecture", "supplement", "widget", "gradedWidget", "ungradedWidget", "lti", "gradedLti", "ungradedLti"]);
+    const quizTypes = new Set(["exam", "quiz", "assignment", "closedAssessment", "phasedPeer", "gradedPeer", "programming", "gradedProgramming", "staffGraded", "ungradedAssignment"]);
+
     while (loopCount < 100) {
       if (tabId && runContext.isCancelled) {
         updateProgress("Process terminated (tab closed).", "error");
@@ -85,108 +118,82 @@ export async function runFullCourse(courseSlug, settings, tabId) {
       const completedIds = await getCompletedItems(userId, courseId);
       const materials = await getCourseMaterials(safeSlug);
       
-      const uncompleted = [];
       const items = materials.linked["onDemandCourseMaterialItems.v2"] || [];
-      
-      for (const item of items) {
-        if (!completedIds.has(item.id) && !skippedItems.has(item.id)) {
-          uncompleted.push(item);
-        }
-      }
+      const uncompleted = items.filter(item => !completedIds.has(item.id) && !skippedItems.has(item.id));
       
       if (items.length > 0) {
         const rate = Math.floor((completedIds.size / items.length) * 100);
         updateDashboard(rate, "completionRate", safeSlug);
       }
+      
       updateProgress(`Found ${uncompleted.length} uncompleted items.`);
       if (uncompleted.length === 0) {
         updateProgress("Course Complete!", "complete");
         break;
       }
       
-      // Process the first available unlocked item
-      let processedAny = false;
-      let allLocked = uncompleted.length > 0;
-      
-      for (const item of uncompleted) {
-        if (tabId && runContext.isCancelled) break;
-        if (item.isLocked) continue;
-        allLocked = false;
-        
-        updateProgress(`Processing item: ${item.name} (${item.contentSummary.typeName})`);
-        
-        try {
-          if (item.contentSummary.typeName === "lecture") {
-            const meta = await getVideoMetadata(courseId, item.id);
-            await watchVideo(userId, safeSlug, courseId, item, meta);
-            updateProgress(`Completed lecture: ${item.name}`, "complete");
-            processedAny = true;
-            break;
-          } else if (item.contentSummary.typeName === "supplement") {
-            await readSupplement(userId, courseId, item.id);
-            updateProgress(`Completed supplement: ${item.name}`, "complete");
-            processedAny = true;
-            break;
-          } else if (["plugin", "notebook"].includes(item.contentSummary.typeName)) {
-            updateProgress(`Skipping unsupported assignment: ${item.name} (${item.contentSummary.typeName})`, "skip");
+      const unlocked = uncompleted.filter(item => !item.isLocked);
+      if (unlocked.length === 0) {
+        updateProgress("Remaining items are locked or waiting. Stopping.", "skip");
+        break;
+      }
+
+      // If in videosOnly mode (or no API key), skip unsupported or AI items
+      if (settings?.videosOnly || !settings?.apiKey?.trim()) {
+        for (const item of unlocked) {
+          const type = item.contentSummary?.typeName;
+          if (quizTypes.has(type) || type === "discussionPrompt" || ["plugin", "notebook"].includes(type)) {
             skippedItems.add(item.id);
-            processedAny = true;
-            break;
-          } else if (["exam", "quiz", "assignment", "closedAssessment", "phasedPeer", "gradedPeer", "programming", "gradedProgramming", "staffGraded", "ungradedAssignment"].includes(item.contentSummary.typeName)) {
-            if (settings?.videosOnly || !settings?.apiKey?.trim()) {
-              updateProgress(`Skipping quiz (No API Key mode): ${item.name}`, "skip");
-              skippedItems.add(item.id);
-              processedAny = true;
-              break;
-            }
+            updateProgress(`Skipping ${item.name} (${type}) in fast-forward mode`, "skip");
+          }
+        }
+      }
+
+      const batchableItems = unlocked.filter(item => batchableTypes.has(item.contentSummary?.typeName));
+      const sequentialItems = unlocked.filter(item => !batchableTypes.has(item.contentSummary?.typeName) && !skippedItems.has(item.id));
+
+      if (batchableItems.length > 0) {
+        updateProgress(`Fast-forwarding ${batchableItems.length} videos & reading items in parallel...`, "active");
+        
+        await runConcurrent(batchableItems, 10, async (item) => {
+          if (tabId && runContext.isCancelled) return;
+          try {
+            await processBatchableItem(item, userId, safeSlug, courseId, updateProgress);
+          } catch (e) {
+            updateProgress(`Failed to process item ${item.name}: ${e.message}`, "error");
+            skippedItems.add(item.id);
+          }
+        });
+        
+        continue;
+      }
+
+      if (sequentialItems.length > 0) {
+        const item = sequentialItems[0];
+        if (tabId && runContext.isCancelled) break;
+        const type = item.contentSummary?.typeName;
+
+        updateProgress(`Processing item: ${item.name} (${type})`);
+        try {
+          if (quizTypes.has(type)) {
             updateProgress(`Triggering quiz solver for ${item.name}`);
             await triggerQuizSolver(courseId, item.id, settings, tabId, safeSlug, runContext);
             updateProgress(`Completed quiz item: ${item.name}`, "complete");
-            processedAny = true;
-            break;
-          } else if (item.contentSummary.typeName === "widget" || item.contentSummary.typeName === "gradedWidget" || item.contentSummary.typeName === "ungradedWidget") {
-            await completeWidget(userId, courseId, item.id);
-            updateProgress(`Completed widget: ${item.name}`, "complete");
-            processedAny = true;
-            break;
-          } else if (item.contentSummary.typeName === "lti" || item.contentSummary.typeName === "gradedLti" || item.contentSummary.typeName === "ungradedLti") {
-            await completeLti(userId, courseId, item.id);
-            updateProgress(`Completed LTI item: ${item.name}`, "complete");
-            processedAny = true;
-            break;
-          } else if (item.contentSummary.typeName === "discussionPrompt") {
-            if (settings?.videosOnly || !settings?.apiKey?.trim()) {
-              updateProgress(`Skipping discussion (No API Key mode): ${item.name}`, "skip");
-              skippedItems.add(item.id);
-              processedAny = true;
-              break;
-            }
+          } else if (type === "discussionPrompt") {
             await solveDiscussion(courseId, item.id, settings, tabId);
             updateProgress(`Completed discussion: ${item.name}`, "complete");
-            processedAny = true;
-            break;
+          } else {
+            updateProgress(`Skipping unsupported item: ${item.name} (${type})`, "skip");
+            skippedItems.add(item.id);
           }
         } catch (e) {
           updateProgress(`Failed to process item ${item.name}: ${e.message}`, "error");
+          skippedItems.add(item.id);
         }
+        continue;
       }
-      
-      if (tabId && runContext.isCancelled) {
-        break;
-      }
-      
-      if (!processedAny) {
-        if (allLocked) {
-          updateProgress("Remaining items are locked. Waiting 5s for Coursera to unlock them...");
-          await delay(5000);
-          continue;
-        } else {
-          updateProgress("No unlocked items could be processed. Stopping.");
-          break;
-        }
-      }
-      
-      await delay(2000);
+
+      break;
     }
   } catch (err) {
     console.error(err);

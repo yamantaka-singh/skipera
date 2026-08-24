@@ -75,13 +75,16 @@ class LiteLLMConnector(object):
 
         from litellm.exceptions import RateLimitError, AuthenticationError
         
+        user_msg = json.dumps(prompt, indent=2) if isinstance(prompt, dict) else prompt
+        logger.debug(f"=== [LLM PROMPT] ===\nSystem: {system_prompt}\nUser: {user_msg}\n====================")
+        
         for attempt in range(len(self.api_keys) or 1):
             try:
                 response = completion(
                     model=self.model,
                     messages=[
                         {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": json.dumps(prompt) if isinstance(prompt, dict) else prompt},
+                        {"role": "user", "content": user_msg},
                     ],
                     timeout=300.0,
                     **kwargs,
@@ -97,6 +100,12 @@ class LiteLLMConnector(object):
                     raise e
 
         content = response["choices"][0]["message"]["content"]
+        logger.debug(f"=== [LLM RAW RESPONSE] ===\n{content}\n==========================")
         if response_schema is not None:
+            if isinstance(content, str):
+                start = content.find("{")
+                end = content.rfind("}")
+                if start != -1 and end != -1:
+                    content = content[start:end+1]
             return json.loads(content)
         return content.strip()

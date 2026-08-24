@@ -118,6 +118,17 @@ export async function watchVideo(userId, courseSlug, courseId, item, metadata) {
   return true;
 }
 
+export async function skipLecture(userId, courseSlug, courseId, item) {
+  try {
+    const meta = await getVideoMetadata(courseId, item.id);
+    return await watchVideo(userId, courseSlug, courseId, item, meta);
+  } catch {
+    const endUrl = `opencourse.v1/user/${userId}/course/${courseSlug}/item/${item.id}/lecture/videoEvents/ended?autoEnroll=false`;
+    const res = await fetchCoursera(endUrl, { method: "POST", body: '{"contentRequestBody":{}}' });
+    return res.ok;
+  }
+}
+
 export async function readSupplement(userId, courseId, itemId) {
   const res = await fetchCoursera("onDemandSupplementCompletions.v1", {
     method: "POST",

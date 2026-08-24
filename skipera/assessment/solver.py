@@ -23,7 +23,7 @@ SYSTEM_PROMPT = (
     "- 'Type': one of 'MULTIPLE_CHOICE', 'CHECKBOX', 'TEXT_REFLECT', 'NUMERIC', 'PLAIN_TEXT', 'TEXT_EXACT_MATCH', 'REGEX', 'FILE_UPLOAD', or 'URL'.\n"
     "- 'previous_attempts': (optional) past attempt results — for CHECKBOX these are option combinations, "
     "for the text/numeric/file types these are answers already graded INCORRECT, each with a hint if the grader gave one.\n\n"
-    "CRITICAL: Always provide a step-by-step logical deduction in the 'reasoning' field before providing your final answer.\n\n"
+    "CRITICAL: Keep 'reasoning' concise (1-2 sentences).\n\n"
     "Rules for each question type:\n"
     "1. MULTIPLE_CHOICE: Single-choice question. Select exactly one option_id and place it in the 'chosen' list.\n"
     "2. CHECKBOX: Multi-choice question. Select one or more option_ids and place them in the 'chosen' list.\n"
@@ -329,10 +329,10 @@ class GradedSolver(object):
                     if self.discarded_questions:
                         logger.error(f"This is likely because there are {len(self.discarded_questions)} unsupported question(s) in this assignment.")
                     return False
-                self._last_unsolved_empty = True
                 logger.info(
                     "All questions already correct — resubmitting same answers.")
 
+            logger.debug(f"=== [SAVING ANSWER RESPONSES] ===\n{json.dumps(answer_responses, indent=2)}\n=================================")
             if not self.save_responses(answer_responses):
                 logger.error("Could not save responses. Please file an issue.")
                 return False

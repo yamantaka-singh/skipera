@@ -1,7 +1,7 @@
 import httpx
 from loguru import logger
 from .. import config
-from ..session_utils import get_csrf_headers, random_delay
+from ..session_utils import get_csrf_headers
 
 
 class Watcher(object):
@@ -62,5 +62,3 @@ class Watcher(object):
 
         if res.status_code != 204:
             logger.error(f"Couldn't update progress for {self.item['name']}")
-        else:
-            random_delay(1.0, 3.0)
