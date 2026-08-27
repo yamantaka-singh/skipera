@@ -1,6 +1,7 @@
 import time
 import os
 import json
+import re
 from datetime import datetime, timezone
 
 import httpx
@@ -15,26 +16,22 @@ from ..llm.connector import DEFAULT_RESPONSE_SCHEMA, get_connector
 from ..session_utils import get_csrf_headers, random_delay
 
 
-SYSTEM_PROMPT = (
+BASE_PROMPT = (
     "Answer the provided questions. Be precise and concise.\n"
     "The questions are in a dict format where each key represents the question id, and the value is a JSON dict containing:\n"
-    "- 'Question': the question text (which might have HTML tags, ignore them).\n"
-    "- 'Options': a list of options (for MULTIPLE_CHOICE and CHECKBOX types) with option_id and value.\n"
-    "- 'Type': one of 'MULTIPLE_CHOICE', 'CHECKBOX', 'TEXT_REFLECT', 'NUMERIC', 'PLAIN_TEXT', 'TEXT_EXACT_MATCH', 'REGEX', 'FILE_UPLOAD', or 'URL'.\n"
-    "- 'previous_attempts': (optional) past attempt results — for CHECKBOX these are option combinations, "
-    "for the text/numeric/file types these are answers already graded INCORRECT, each with a hint if the grader gave one.\n\n"
-    "CRITICAL: Keep 'reasoning' concise (1-2 sentences).\n\n"
-    "Rules for each question type:\n"
+    "- 'Question': the question text.\n"
+    "- 'Options': a list of options (if applicable) with option_id and value.\n"
+    "- 'Type': the type of question.\n"
+    "- 'previous_attempts': (optional) past attempt results. ALWAYS review these to avoid repeating mistakes.\n\n"
+    "CRITICAL: Keep 'reasoning' concise (1-2 sentences). NEVER answer in markdown formatting (no bold, italics, or code blocks) unless explicitly stated by the question.\n\n"
+)
+
+SKILL_LOGIC = (
+    "You are the Logic Agent. Your skill is deductive reasoning and process of elimination.\n"
+    "Rules:\n"
     "1. MULTIPLE_CHOICE: Single-choice question. Select exactly one option_id and place it in the 'chosen' list.\n"
     "2. CHECKBOX: Multi-choice question. Select one or more option_ids and place them in the 'chosen' list.\n"
-    "3. TEXT_REFLECT: Question with no options. Answer the question prompt thoughtfully and precisely "
-    "matching the question content. The response in the 'answer' field must be a high-quality, relevant response directly answering the prompt.\n"
-    "4. NUMERIC, TEXT_EXACT_MATCH, REGEX: Answer with the exact short value the question expects (a number, "
-    "a word, or a value matching the expected pattern), in the 'answer' field. Never repeat an answer listed "
-    "in 'previous_attempts' — it was already graded wrong.\n"
-    "5. PLAIN_TEXT: Short free-text answer, in the 'answer' field. Never repeat an answer listed in 'previous_attempts'.\n"
-    "6. FILE_UPLOAD: Question requiring a file or submission summary. Provide a concise, high-quality assignment submission response in the 'answer' field.\n"
-    "7. URL: Question requiring a project URL. Provide a relevant URL or GitHub repo link in the 'answer' field.\n\n"
+    "3. MULTIPLE_FILLABLE_BLANKS: Provide a dict of blank_id to option_id in the 'answer' field.\n\n"
     "IMPORTANT for CHECKBOX:\n"
     "If a question has 'previous_attempts', each entry records a prior submission of chosen option_ids:\n"
     "- 'response' is a list of option_ids that were chosen together.\n"
@@ -42,10 +39,63 @@ SYSTEM_PROMPT = (
     "Use these partial scores to logically deduce the status of options (e.g., if a combination of size 3 got 2/3 correct, then exactly 2 of those options are correct, and 1 is incorrect). Integrate all attempts to find an untested combination that satisfies these constraints."
 )
 
+SKILL_CODE_EXPRESSION = (
+    "You are the Code Agent. Your skill is writing flawless, raw code snippets.\n"
+    "Rules:\n"
+    "1. CODE_EXPRESSION: Provide the exact code snippet required in the 'answer' field. You MUST wrap the code in markdown ``` backticks (e.g. ```python\\n...\\n```). CRITICAL: Preserve all newlines (\\n) and indentation.\n"
+    "2. Assume a Python context by default unless specified otherwise. Import necessary standard libraries implicitly required."
+)
+
+SKILL_REGEX = (
+    "You are the Regex Agent. Your skill is writing flawless regular expressions.\n"
+    "Rules:\n"
+    "1. REGEX: Answer with the exact matching regular expression text ONLY, no wrapping quotes or slashes, in the 'answer' field."
+)
+
+SKILL_MATH = (
+    "You are the Math Agent. Your skill is precise mathematical calculation.\n"
+    "Rules:\n"
+    "1. NUMERIC: Answer with the exact number ONLY, no quotes (e.g., 42), in the 'answer' field.\n"
+    "2. MATH: Provide the exact math expression required in the 'answer' field.\n"
+    "3. If complex computation is implied, utilize your knowledge of libraries like numpy, scipy, sympy, or math to derive the correct numerical answer."
+)
+
+SKILL_TEXT = (
+    "You are the Text Agent. Your skill is reading comprehension and concise free-text generation.\n"
+    "Rules:\n"
+    "1. TEXT_REFLECT, PLAIN_TEXT, RICH_TEXT: Free-text answer in the 'answer' field. Be thoughtful and highly relevant.\n"
+    "2. TEXT_EXACT_MATCH: Answer with the exact matching text ONLY, no wrapping quotes, in the 'answer' field.\n"
+    "3. FILE_UPLOAD, URL, WIDGET: Provide a relevant submission summary, URL, or JSON in the 'answer' field."
+)
+
+DOMAIN_MAP = {
+    "MULTIPLE_CHOICE": ("LOGIC", SKILL_LOGIC),
+    "CHECKBOX": ("LOGIC", SKILL_LOGIC),
+    "MULTIPLE_FILLABLE_BLANKS": ("LOGIC", SKILL_LOGIC),
+    "CODE_EXPRESSION": ("CODE_EXPRESSION", SKILL_CODE_EXPRESSION),
+    "REGEX": ("REGEX", SKILL_REGEX),
+    "MATH": ("MATH", SKILL_MATH),
+    "NUMERIC": ("MATH", SKILL_MATH),
+    "TEXT_REFLECT": ("TEXT", SKILL_TEXT),
+    "PLAIN_TEXT": ("TEXT", SKILL_TEXT),
+    "RICH_TEXT": ("TEXT", SKILL_TEXT),
+    "TEXT_EXACT_MATCH": ("TEXT", SKILL_TEXT),
+    "FILE_UPLOAD": ("TEXT", SKILL_TEXT),
+    "URL": ("TEXT", SKILL_TEXT),
+    "WIDGET": ("TEXT", SKILL_TEXT),
+}
+
+def inject_reflection(domain_questions: dict) -> str:
+    has_attempts = any(q.get("previous_attempts") for q in domain_questions.values())
+    if has_attempts:
+        return "\n\nREFLECTION SKILL ACTIVATED: One or more questions in this batch have previous incorrect attempts. Analyze the 'previous_attempts' array carefully. Understand why the previous answer failed based on the provided hint, and generate a distinctly different and correct answer."
+    return ""
+
 
 TYPE_LOOKUP = {
     "MULTIPLE_CHOICE": ("multipleChoiceResponse", "chosen"),
     "CHECKBOX": ("checkboxResponse", "chosen"),
+    "CHECKBOX_REFLECT": ("checkboxResponse", "chosen"),
     "TEXT_REFLECT": ("textReflectResponse", "answer"),
     "NUMERIC": ("numericResponse", "answer"),
     "PLAIN_TEXT": ("plainTextResponse", "plainText"),
@@ -53,10 +103,26 @@ TYPE_LOOKUP = {
     "REGEX": ("regexResponse", "answer"),
     "FILE_UPLOAD": ("fileUploadResponse", "fileUrl"),
     "URL": ("urlResponse", "url"),
+    "CODE_EXPRESSION": ("codeExpressionResponse", "answer"),
+    "MATH": ("mathResponse", "answer"),
+    "RICH_TEXT": ("richTextResponse", "richText"),
+    "WIDGET": ("widgetResponse", "answer"),
 }
 
 # Question types with a single free-text/numeric/file answer, no options — handled uniformly.
-TEXT_ANSWER_TYPES = {"TEXT_REFLECT", "NUMERIC", "PLAIN_TEXT", "TEXT_EXACT_MATCH", "REGEX", "FILE_UPLOAD", "URL"}
+TEXT_ANSWER_TYPES = {"TEXT_REFLECT", "NUMERIC", "PLAIN_TEXT", "TEXT_EXACT_MATCH", "REGEX", "FILE_UPLOAD", "URL", "CODE_EXPRESSION", "MATH", "RICH_TEXT", "WIDGET"}
+
+def strip_html_tags(text: str) -> str:
+    if not text:
+        return ""
+    # Strip hidden anti-cheating spans (e.g., display: none, opacity: 0, white text)
+    text = re.sub(r'<[^>]*display:\s*none[^>]*>.*?</[^>]+>', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'<[^>]*color:\s*(?:white|#ffffff|#fff)[^>]*>.*?</[^>]+>', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'<[^>]*opacity:\s*0[^>]*>.*?</[^>]+>', '', text, flags=re.IGNORECASE)
+    # Strip remaining HTML tags
+    text = re.sub(r'<[^>]+>', '', text)
+    # Clean up excessive newlines
+    return re.sub(r'\n\s*\n', '\n', text).strip()
 
 
 class GradedSolver(object):
@@ -107,7 +173,7 @@ class GradedSolver(object):
                     }
                 }
             }
-        elif q_type == "CHECKBOX":
+        elif q_type in ["CHECKBOX", "CHECKBOX_REFLECT"]:
             return {
                 "questionId": part_id,
                 "questionType": q_type,
@@ -150,6 +216,49 @@ class GradedSolver(object):
                     }
                 }
             }
+        elif q_type == "CODE_EXPRESSION":
+            return {
+                "questionId": part_id,
+                "questionType": q_type,
+                "questionResponse": {
+                    "codeExpressionResponse": {
+                        "answer": {
+                            "code": answer or ""
+                        }
+                    }
+                }
+            }
+        elif q_type == "RICH_TEXT":
+            return {
+                "questionId": part_id,
+                "questionType": q_type,
+                "questionResponse": {
+                    "richTextResponse": {
+                        "richText": {
+                            "value": answer or ""
+                        }
+                    }
+                }
+            }
+        elif q_type == "MULTIPLE_FILLABLE_BLANKS":
+            responses = []
+            if isinstance(answer, dict):
+                for blank_id, opt_id in answer.items():
+                    responses.append({
+                        "multipleChoiceFillableBlankResponse": {
+                            "id": blank_id,
+                            "optionId": opt_id
+                        }
+                    })
+            return {
+                "questionId": part_id,
+                "questionType": q_type,
+                "questionResponse": {
+                    "multipleFillableBlanksResponse": {
+                        "responses": responses
+                    }
+                }
+            }
         else:
             response_key, val_key = TYPE_LOOKUP[q_type]
             return {
@@ -157,12 +266,12 @@ class GradedSolver(object):
                 "questionType": q_type,
                 "questionResponse": {
                     response_key: {
-                        val_key: answer or None
+                        val_key: answer or "" if val_key in ["plainText", "answer"] else answer
                     }
                 }
             }
 
-    def solve(self) -> bool:
+    def solve(self, override_prompt: str = None) -> bool:
         # Overwrite minimum passing score
         target_grade = 0.8
         max_attempts = 3
@@ -310,19 +419,113 @@ class GradedSolver(object):
                 self._last_unsolved_empty = False
                 connector = get_connector()
                 
-                custom_prompt = SYSTEM_PROMPT
-                if self.course_name and self.item_name:
-                    custom_prompt += f"\n\nContext: You are solving a quiz/assignment named '{self.item_name}' for the course '{self.course_name}'. Use this context to inform your reasoning."
+                # Group questions by domain to apply specialized agents
+                domain_groups = {}
+                for qid, q in unsolved_questions.items():
+                    domain, skill_prompt = DOMAIN_MAP.get(q["Type"], ("TEXT", SKILL_TEXT))
+                    if domain not in domain_groups:
+                        domain_groups[domain] = {"skill": skill_prompt, "questions": {}}
+                    domain_groups[domain]["questions"][qid] = q
+
+                # Process sequentially to respect strict API limits (e.g., 40 RPM)
+                for domain, group_data in domain_groups.items():
+                    domain_questions = group_data["questions"]
+                    
+                    if override_prompt:
+                        custom_prompt = override_prompt
+                    else:
+                        reflection = inject_reflection(domain_questions)
+                        custom_prompt = BASE_PROMPT + group_data["skill"] + reflection
+
+                    llm_result = connector.get_response(
+                        domain_questions, system_prompt=custom_prompt, response_schema=DEFAULT_RESPONSE_SCHEMA)
+                    
+                    for ans in llm_result.get("responses", []):
+                        ans_type = domain_questions[ans["question_id"]]["Type"]
+                        chosen = ans.get("chosen")
+                        answer = ans.get("answer")
+                        
+                        # Post-processing Guardrails
+                        if ans_type != "MULTIPLE_FILLABLE_BLANKS" and isinstance(answer, dict):
+                            keys = list(answer.keys())
+                            if keys:
+                                answer = str(answer[keys[0]])
+                            else:
+                                answer = ""
+
+                        if ans_type == "CHECKBOX" and isinstance(chosen, str):
+                            chosen = [chosen]
+                        
+                        if ans_type in ["NUMERIC", "TEXT_EXACT_MATCH", "REGEX"] and isinstance(answer, str):
+                            # Strip accidental quotes that LLMs might wrap around raw values
+                            if (answer.startswith('"') and answer.endswith('"')) or (answer.startswith("'") and answer.endswith("'")):
+                                answer = answer[1:-1]
+
+                        if ans_type == "NUMERIC" and isinstance(answer, str):
+                            try:
+                                parsed = float(answer)
+                                answer = str(parsed)
+                            except ValueError:
+                                pass
+                                
+                        if ans_type == "CODE_EXPRESSION" and isinstance(answer, str):
+                            answer = re.sub(r'^```[a-zA-Z]*\n', '', answer)
+                            answer = re.sub(r'\n```$', '', answer)
+                            answer = re.sub(r'^```\n?', '', answer)
+                            answer = re.sub(r'\n?```$', '', answer)
+                            answer = answer.strip()
+                            
+                        if ans_type == "REGEX" and isinstance(answer, str):
+                            answer = re.sub(r'^r[\'"]|[\'"]$', '', answer)
+                            answer = re.sub(r'^/|/$', '', answer)
+
+                        if ans_type == "MULTIPLE_CHOICE" and isinstance(chosen, list) and len(chosen) > 0:
+                            # Fuzzy match option text back to option ID if LLM hallucinates text instead of ID
+                            opt_id = str(chosen[0])
+                            opts = domain_questions[ans["question_id"]].get("Options", [])
+                            if not any(o["option_id"] == opt_id for o in opts):
+                                # ID not found, check if it's text
+                                for o in opts:
+                                    if opt_id.lower() in o["value"].lower():
+                                        chosen = [o["option_id"]]
+                                        break
+
+                        if ans_type in ["MULTIPLE_CHOICE", "CHECKBOX"] and isinstance(chosen, list):
+                            mapped_chosen = []
+                            for c in chosen:
+                                c_str = str(c)
+                                opt_obj = next((o for o in domain_questions[ans["question_id"]]["Options"] if o["option_id"] == c_str), None)
+                                if opt_obj and "original_id" in opt_obj:
+                                    mapped_chosen.append(opt_obj["original_id"])
+                                else:
+                                    mapped_chosen.append(c_str)
+                            chosen = mapped_chosen
+
+                        answer_responses.append(self._format_response(
+                            part_id=ans["question_id"],
+                            q_type=ans_type, # Don't trust the LLM to echo back question_type
+                            chosen=chosen,
+                            answer=answer
+                        ))
+
+            answered_ids = [r["questionId"] for r in answer_responses]
+            draft_elements = state.get("attempts", {}).get("inProgressAttempt", {}).get("draft", {}).get("parts", [])
+            for part in draft_elements:
+                if "partId" not in part:
+                    continue
+                q_id = part["partId"]
+                q_type = part.get("__typename")
                 
-                llm_result = connector.get_response(
-                    unsolved_questions, system_prompt=custom_prompt, response_schema=DEFAULT_RESPONSE_SCHEMA)
-                for ans in llm_result.get("responses", []):
-                    answer_responses.append(self._format_response(
-                        part_id=ans["question_id"],
-                        q_type=unsolved_questions[ans["question_id"]]["Type"], # Don't trust the LLM to echo back question_type
-                        chosen=ans.get("chosen"),
-                        answer=ans.get("answer")
-                    ))
+                if q_type in WHITELISTED_QUESTION_TYPES and q_type in QUESTION_TYPE_MAP:
+                    if q_id not in answered_ids:
+                        logger.warning(f"LLM failed to provide an answer for {q_id}. Sending blank response.")
+                        answer_responses.append({
+                            "questionId": q_id,
+                            "questionType": QUESTION_TYPE_MAP[q_type][1],
+                            "questionResponse": {
+                                QUESTION_TYPE_MAP[q_type][0]: deep_blank_model(MODEL_MAP[q_type])
+                            }
+                        })
             else:
                 if getattr(self, "_last_unsolved_empty", False):
                     logger.error("Infinite loop detected: all supported questions are correct, but target grade not reached.")
@@ -381,9 +584,8 @@ class GradedSolver(object):
                 "itemId": self.item_id
             },
             "query": GET_STATE_QUERY
-        }).json()
-
-        return res["data"]["SubmissionState"]["queryState"]
+        })
+        return res.json()["data"]["SubmissionState"]["queryState"]
 
     def initiate_attempt(self) -> bool:
         """
@@ -441,16 +643,17 @@ class GradedSolver(object):
 
             options = []
             options_schema = question["questionSchema"].get("options") or []
-            for option in options_schema:
+            for i, option in enumerate(options_schema):
                 val = option["display"]["cmlValue"]
                 options.append({
-                    "option_id": option["optionId"],
-                    "value": val,
+                    "original_id": option["optionId"],
+                    "option_id": f"opt_{i+1}",
+                    "value": strip_html_tags(val),
                     "correct": existing_correctness.get(val, None)
                 })
 
             questions_formatted[part_id] = {
-                "Question": question["questionSchema"]["prompt"]["cmlValue"],
+                "Question": strip_html_tags(question["questionSchema"]["prompt"]["cmlValue"]),
                 "Options": options,
                 "Type": QUESTION_TYPE_MAP[question["__typename"]][1],
             }
@@ -497,8 +700,27 @@ class GradedSolver(object):
                 pass
             return True
 
-        logger.debug([*answer_responses, *self.discarded_questions])
-        logger.debug(res.json())
+        logger.debug(f"Bulk save failed: {res.json()}")
+        logger.debug("Attempting to save responses one by one to isolate the error...")
+        for r in [*answer_responses, *self.discarded_questions]:
+            r_res = self.session.post(url=GRAPHQL_URL, headers=get_csrf_headers(self.session), params={
+                "opname": "Submission_SaveResponses"
+            }, json={
+                "operationName": "Submission_SaveResponses",
+                "variables": {
+                    "input": {
+                        "courseId": self.course_id,
+                        "itemId": self.item_id,
+                        "attemptId": self.attempt_id,
+                        "questionResponses": [r]
+                    }
+                },
+                "query": SAVE_RESPONSES_QUERY
+            })
+            if "Submission_SaveResponsesSuccess" not in r_res.text:
+                logger.error(f"Failed response payload: {json.dumps(r)}")
+                logger.error(f"Server error: {r_res.json()}")
+
         return False
 
     def submit_draft(self) -> bool:

@@ -10,9 +10,6 @@ from .. import config
 
 class ResponseFormat(BaseModel):
     question_id: str
-    question_type: Literal["MULTIPLE_CHOICE", "CHECKBOX", "TEXT_REFLECT",
-                            "NUMERIC", "PLAIN_TEXT", "TEXT_EXACT_MATCH", "REGEX",
-                            "FILE_UPLOAD", "URL"]
     reasoning: str
     chosen: Optional[List[str]] = None
     answer: Optional[str] = None
@@ -63,18 +60,22 @@ class LiteLLMConnector(object):
         logger.debug(f"Making an API request to {self.model}...")
         kwargs = {}
         if response_schema is not None:
-            kwargs["response_format"] = {
-                "type": "json_schema",
-                "json_schema": {"name": "response", "schema": response_schema, "strict": False},
-            }
+            kwargs["response_format"] = {"type": "json_object"}
 
         if "nvidia" in self.model or "nemotron" in self.model:
             kwargs["extra_body"] = {
                 "chat_template_kwargs": {"enable_thinking": False}
             }
 
+        kwargs["temperature"] = 0.0
+        kwargs["top_p"] = 1.0
+        kwargs["presence_penalty"] = 0.0
+        kwargs["frequency_penalty"] = 0.0
+
         from litellm.exceptions import RateLimitError, AuthenticationError
-        
+        if response_schema is not None:
+            system_prompt += "\n\nCRITICAL: You must respond with a valid JSON object matching this schema:\n" + json.dumps(response_schema)
+            
         user_msg = json.dumps(prompt, indent=2) if isinstance(prompt, dict) else prompt
         logger.debug(f"=== [LLM PROMPT] ===\nSystem: {system_prompt}\nUser: {user_msg}\n====================")
         

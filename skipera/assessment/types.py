@@ -7,12 +7,15 @@ WHITELISTED_QUESTION_TYPES = [
     "Submission_NumericQuestion", "Submission_PlainTextQuestion",
     "Submission_TextExactMatchQuestion", "Submission_RegexQuestion",
     "Submission_FileUploadQuestion", "Submission_UrlQuestion",
+    "Submission_CodeExpressionQuestion", "Submission_MathQuestion",
+    "Submission_RichTextQuestion", "Submission_WidgetQuestion",
+    "Submission_MultipleFillableBlanksQuestion", "Submission_CheckboxReflectQuestion"
 ]
 
 
 QUESTION_TYPE_MAP = {
     "Submission_CheckboxQuestion": ["checkboxResponse", "CHECKBOX"],
-    "Submission_CheckboxReflectQuestion": ["checkboxReflectResponse", "CHECKBOX_REFLECT"],
+    "Submission_CheckboxReflectQuestion": ["checkboxResponse", "CHECKBOX_REFLECT"],
     "Submission_CodeExpressionQuestion": ["codeExpressionResponse", "CODE_EXPRESSION"],
     "Submission_FileUploadQuestion": ["fileUploadResponse", "FILE_UPLOAD"],
     "Submission_MathQuestion": ["mathResponse", "MATH"],
@@ -36,6 +39,10 @@ class Submission_CodeInput(BaseModel):
 
 
 class Submission_CheckboxQuestion(BaseModel):
+    chosen: Optional[List[str]] = None
+
+
+class Submission_CheckboxReflectQuestion(BaseModel):
     chosen: Optional[List[str]] = None
 
 
@@ -110,6 +117,7 @@ class Submission_WidgetQuestion(BaseModel):
 
 MODEL_MAP = {
     "Submission_CheckboxQuestion": Submission_CheckboxQuestion,
+    "Submission_CheckboxReflectQuestion": Submission_CheckboxReflectQuestion,
     "Submission_CodeExpressionQuestion": Submission_CodeExpressionQuestion,
     "Submission_FileUploadQuestion": Submission_FileUploadQuestion,
     "Submission_MathQuestion": Submission_MathQuestion,
@@ -139,6 +147,10 @@ def deep_blank_model(model_cls):
 
         if isinstance(annotation, type) and issubclass(annotation, BaseModel):
             data[name] = deep_blank_model(annotation)
+        elif "list" in str(annotation).lower():
+            data[name] = []
+        elif "str" in str(annotation).lower() and name == "answer":
+            data[name] = ""
         else:
             data[name] = None
 

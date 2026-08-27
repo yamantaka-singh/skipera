@@ -2,6 +2,7 @@
 import { fetchCoursera, delay } from './courseraApi.js';
 import { GET_STATE_QUERY, INITIATE_ATTEMPT_QUERY, SAVE_RESPONSES_QUERY, SUBMIT_DRAFT_QUERY, ASSIGNMENT_FEEDBACK_QUERY } from './queries.js';
 import { callLLMProvider } from './llmProviders.js';
+import { getAgentForType, getReflectionPrompt, stripHtmlTags } from './agents.js';
 
 async function fetchGraphQL(opname, query, variables) {
   const res = await fetchCoursera("https://www.coursera.org/graphql-gateway", {
@@ -30,80 +31,14 @@ async function fetchGraphQL(opname, query, variables) {
   return data;
 }
 
-async function callLLM(unsolvedQuestions, settings) {
-  const systemPrompt = `Answer the provided questions. Be precise and concise.
-The questions are in a dict format where each key represents the question id, and the value is a JSON dict containing:
-- 'Question': the question text (which might have HTML tags, ignore them).
-- 'Options': a list of options (for MULTIPLE_CHOICE and CHECKBOX types) with option_id and value.
-- 'Type': one of 'MULTIPLE_CHOICE', 'CHECKBOX', 'TEXT_REFLECT', 'NUMERIC', 'PLAIN_TEXT', 'TEXT_EXACT_MATCH', 'REGEX', 'FILE_UPLOAD', or 'URL'.
-- 'previous_attempts': (optional) past attempt results.
+const TEXT_ANSWER_TYPES = new Set(["TEXT_REFLECT", "NUMERIC", "PLAIN_TEXT", "TEXT_EXACT_MATCH", "REGEX", "FILE_UPLOAD", "URL", "CODE_EXPRESSION", "MATH", "RICH_TEXT", "WIDGET"]);
 
-CRITICAL: Keep 'reasoning' concise (1-2 sentences).
-
-Rules for each question type:
-1. MULTIPLE_CHOICE: Select exactly one option_id and place it in the 'chosen' list.
-2. CHECKBOX: Select one or more option_ids and place them in the 'chosen' list.
-3. TEXT_REFLECT, NUMERIC, PLAIN_TEXT, TEXT_EXACT_MATCH, REGEX, FILE_UPLOAD, URL: Answer in the 'answer' field.
-
-IMPORTANT for CHECKBOX:
-If a question has 'previous_attempts', each entry records a prior submission of chosen option_ids.
-Use partial scores to logically deduce the status of options.`;
-
+async function callLLM(unsolvedQuestions, settings, systemPrompt) {
   const userPrompt = JSON.stringify(unsolvedQuestions, null, 2);
   const keys = settings.apiKey.split(",").map(k => k.trim()).filter(k => k);
   const provider = settings.provider || "nvidia";
   
   return await callLLMProvider(provider, keys, settings.modelName, systemPrompt, userPrompt);
-}
-
-const TYPE_LOOKUP = {
-  "MULTIPLE_CHOICE": ["multipleChoiceResponse", "chosen"],
-  "CHECKBOX": ["checkboxResponse", "chosen"],
-  "TEXT_REFLECT": ["textReflectResponse", "answer"],
-  "NUMERIC": ["numericResponse", "answer"],
-  "PLAIN_TEXT": ["plainTextResponse", "plainText"],
-  "TEXT_EXACT_MATCH": ["textExactMatchResponse", "answer"],
-  "REGEX": ["regexResponse", "answer"],
-  "FILE_UPLOAD": ["fileUploadResponse", "fileUrl"],
-  "URL": ["urlResponse", "url"],
-};
-const TEXT_ANSWER_TYPES = new Set(["TEXT_REFLECT", "NUMERIC", "PLAIN_TEXT", "TEXT_EXACT_MATCH", "REGEX", "FILE_UPLOAD", "URL"]);
-
-function formatResponse(partId, qType, chosen = null, answer = null) {
-  if (qType === "MULTIPLE_CHOICE") {
-    return {
-      questionId: partId,
-      questionType: qType,
-      questionResponse: { multipleChoiceResponse: { chosen: chosen ? chosen[0] : null } }
-    };
-  } else if (qType === "CHECKBOX") {
-    return {
-      questionId: partId,
-      questionType: qType,
-      questionResponse: { checkboxResponse: { chosen: chosen || [] } }
-    };
-  } else if (qType === "FILE_UPLOAD") {
-    const urlVal = (answer && answer.startsWith("http")) ? answer : "https://raw.githubusercontent.com/yamantaka-singh/skipera/main/README.md";
-    return {
-      questionId: partId,
-      questionType: qType,
-      questionResponse: { fileUploadResponse: { title: "submission.txt", caption: answer || "Assignment Submission", fileUrl: urlVal } }
-    };
-  } else if (qType === "URL") {
-    const urlVal = (answer && answer.startsWith("http")) ? answer : "https://github.com";
-    return {
-      questionId: partId,
-      questionType: qType,
-      questionResponse: { urlResponse: { title: "Project Submission", caption: answer || "Submission URL", url: urlVal } }
-    };
-  } else {
-    const [responseKey, valKey] = TYPE_LOOKUP[qType];
-    return {
-      questionId: partId,
-      questionType: qType,
-      questionResponse: { [responseKey]: { [valKey]: answer || null } }
-    };
-  }
 }
 
 import { updateDashboard } from './dashboardStore.js';
@@ -170,13 +105,19 @@ export async function triggerQuizSolver(courseId, itemId, settings, tabId, cours
     const QTYPE_MAP = {
       "Submission_MultipleChoiceQuestion": "MULTIPLE_CHOICE",
       "Submission_CheckboxQuestion": "CHECKBOX",
+      "Submission_CheckboxReflectQuestion": "CHECKBOX_REFLECT",
       "Submission_TextReflectQuestion": "TEXT_REFLECT",
       "Submission_NumericQuestion": "NUMERIC",
       "Submission_PlainTextQuestion": "PLAIN_TEXT",
       "Submission_TextExactMatchQuestion": "TEXT_EXACT_MATCH",
       "Submission_RegexQuestion": "REGEX",
       "Submission_FileUploadQuestion": "FILE_UPLOAD",
-      "Submission_UrlQuestion": "URL"
+      "Submission_UrlQuestion": "URL",
+      "Submission_CodeExpressionQuestion": "CODE_EXPRESSION",
+      "Submission_MathQuestion": "MATH",
+      "Submission_RichTextQuestion": "RICH_TEXT",
+      "Submission_WidgetQuestion": "WIDGET",
+      "Submission_MultipleFillableBlanksQuestion": "MULTIPLE_FILLABLE_BLANKS"
     };
     
     for (const part of parts) {
@@ -195,22 +136,24 @@ export async function triggerQuizSolver(courseId, itemId, settings, tabId, cours
       
       const prompt = part.questionSchema.prompt?.cmlValue || "";
       const schemaOptions = part.questionSchema.options || [];
-      const options = schemaOptions.map(opt => {
+      const options = schemaOptions.map((opt, idx) => {
         const val = opt.display.cmlValue;
         const existing = qd.Options.find(o => o.value === val);
         return {
-          option_id: opt.optionId,
-          value: val,
+          original_id: opt.optionId,
+          option_id: `opt_${idx + 1}`,
+          value: stripHtmlTags(val),
           correct: existing ? existing.correct : null
         };
       });
       qd.Options = options;
       qd.Type = qTypeStr;
-      qd.Question = prompt;
+      qd.Question = stripHtmlTags(prompt);
 
       if (TEXT_ANSWER_TYPES.has(qTypeStr)) {
         if (qd.correct_answer) {
-          answerResponses.push(formatResponse(partId, qTypeStr, null, qd.correct_answer));
+          const agent = getAgentForType(qTypeStr);
+          answerResponses.push(agent.formatPayload(partId, qTypeStr, null, qd.correct_answer));
         } else {
           unsolvedQuestions[partId] = { Question: prompt, Options: [], Type: qTypeStr };
           if (qd.wrong_attempts) unsolvedQuestions[partId].previous_attempts = qd.wrong_attempts;
@@ -218,20 +161,23 @@ export async function triggerQuizSolver(courseId, itemId, settings, tabId, cours
       } else if (qTypeStr === "MULTIPLE_CHOICE") {
         const knownCorrect = options.find(o => o.correct === true);
         if (knownCorrect) {
-          answerResponses.push(formatResponse(partId, qTypeStr, [knownCorrect.option_id]));
+          const agent = getAgentForType(qTypeStr);
+          answerResponses.push(agent.formatPayload(partId, qTypeStr, [knownCorrect.option_id]));
           continue;
         }
         const filtered = options.filter(o => o.correct !== false);
         if (filtered.length === 1) {
-          answerResponses.push(formatResponse(partId, qTypeStr, [filtered[0].option_id]));
+          const agent = getAgentForType(qTypeStr);
+          answerResponses.push(agent.formatPayload(partId, qTypeStr, [filtered[0].option_id]));
           continue;
         }
         unsolvedQuestions[partId] = { Question: prompt, Options: filtered, Type: qTypeStr };
-      } else if (qTypeStr === "CHECKBOX") {
+      } else if (qTypeStr === "CHECKBOX" || qTypeStr === "CHECKBOX_REFLECT") {
         const allResolved = options.every(o => o.correct !== null);
         if (allResolved) {
           const correctIds = options.filter(o => o.correct === true).map(o => o.option_id);
-          answerResponses.push(formatResponse(partId, qTypeStr, correctIds));
+          const agent = getAgentForType(qTypeStr);
+          answerResponses.push(agent.formatPayload(partId, qTypeStr, correctIds));
           continue;
         }
         const filtered = options.filter(o => o.correct !== false);
@@ -241,17 +187,56 @@ export async function triggerQuizSolver(courseId, itemId, settings, tabId, cours
 
     if (Object.keys(unsolvedQuestions).length > 0) {
       updateProgress("Calling LLM for unsolved questions...");
-      const llmResult = await callLLM(unsolvedQuestions, settings);
       
-      if (!llmResult || !llmResult.responses || llmResult.responses.length === 0) {
-        throw new Error("LLM returned an empty or invalid response format.");
+      let domainGroups = {};
+      for (const [qid, q] of Object.entries(unsolvedQuestions)) {
+        const agent = getAgentForType(q.Type);
+        const domain = agent.domain;
+        if (!domainGroups[domain]) {
+          domainGroups[domain] = { agent: agent, questions: {} };
+        }
+        domainGroups[domain].questions[qid] = q;
       }
-      
-      for (const ans of llmResult.responses) {
-        answerResponses.push(formatResponse(ans.question_id, unsolvedQuestions[ans.question_id].Type, ans.chosen, ans.answer));
+
+      for (const [domain, groupData] of Object.entries(domainGroups)) {
+        let domainQuestions = groupData.questions;
+        let reflection = getReflectionPrompt(domainQuestions);
+        let customPrompt = groupData.agent.buildPrompt(domainQuestions, reflection);
+        
+        const llmResult = await callLLM(domainQuestions, settings, customPrompt);
+        
+        if (!llmResult || !llmResult.responses || llmResult.responses.length === 0) {
+          throw new Error(`LLM returned an empty or invalid response format for domain ${domain}.`);
+        }
+        
+        for (const ans of llmResult.responses) {
+          let ansType = domainQuestions[ans.question_id].Type;
+          let agent = getAgentForType(ansType);
+          
+          let { chosen, answer } = agent.postProcess(ansType, ans.chosen, ans.answer, domainQuestions, ans.question_id);
+          
+          answerResponses.push(agent.formatPayload(ans.question_id, ansType, chosen, answer));
+        }
       }
     } else {
       updateProgress("All questions answered via local cache.");
+    }
+
+    // Ensure all draft elements are answered, fallback to blank response if omitted by LLM
+    const answeredIds = new Set(answerResponses.map(r => r.questionId));
+    for (const part of parts) {
+      if (part.__typename === "Submission_TextBlock" || !part.partId) continue;
+      const partId = part.partId;
+      const qTypeStr = QTYPE_MAP[part.__typename];
+      if (qTypeStr && !answeredIds.has(partId)) {
+        console.warn(`[Skipera Solver] LLM did not answer ${partId} (${qTypeStr}). Sending blank fallback response.`);
+        const agent = getAgentForType(qTypeStr);
+        try {
+          answerResponses.push(agent.formatPayload(partId, qTypeStr, [], ""));
+        } catch (e) {
+          console.error(`Could not format blank payload for ${partId}:`, e);
+        }
+      }
     }
 
     // 3. Save Responses
@@ -295,16 +280,11 @@ export async function triggerQuizSolver(courseId, itemId, settings, tabId, cours
         if (!isCorrect && submitted) {
           qd.wrong_attempts = qd.wrong_attempts || [];
           let chosen = null;
-          if (qd.Type === "CHECKBOX") {
-            chosen = submitted.questionResponse.checkboxResponse?.chosen;
+          if (qd.Type === "CHECKBOX" || qd.Type === "CHECKBOX_REFLECT") {
+            chosen = submitted.questionResponse.checkboxResponse?.chosen || [];
           } else if (qd.Type === "MULTIPLE_CHOICE") {
             const mChosen = submitted.questionResponse.multipleChoiceResponse?.chosen;
             chosen = mChosen ? [mChosen] : [];
-            // For multiple choice, mark the single chosen option as definitely wrong
-            if (chosen.length === 1) {
-              const wrongOpt = qd.Options.find(o => o.option_id === chosen[0]);
-              if (wrongOpt) wrongOpt.correct = false;
-            }
           } else {
             const resKeys = Object.keys(submitted.questionResponse);
             if (resKeys.length > 0) {
@@ -312,15 +292,32 @@ export async function triggerQuizSolver(courseId, itemId, settings, tabId, cours
                if (valKeys.length > 0) chosen = submitted.questionResponse[resKeys[0]][valKeys[0]];
             }
           }
-          if (chosen) qd.wrong_attempts.push(chosen);
+          
+          let mappedChosen = chosen;
+          if (Array.isArray(chosen) && ["MULTIPLE_CHOICE", "CHECKBOX", "CHECKBOX_REFLECT"].includes(qd.Type)) {
+            mappedChosen = [];
+            for (let c of chosen) {
+              const wrongOpt = qd.Options.find(o => o.option_id === c || o.original_id === c);
+              if (wrongOpt) {
+                mappedChosen.push(wrongOpt.option_id);
+                // For multiple choice, mark the single chosen option as definitely wrong
+                if (qd.Type === "MULTIPLE_CHOICE" && chosen.length === 1) {
+                  wrongOpt.correct = false;
+                }
+              } else {
+                mappedChosen.push(c);
+              }
+            }
+          }
+          if (mappedChosen) qd.wrong_attempts.push(mappedChosen);
         } else if (isCorrect && submitted) {
           // If the question is correct, cache the correct answer in case we need to retry the whole quiz
           if (qd.Type === "CHECKBOX") {
              const chosen = submitted.questionResponse.checkboxResponse?.chosen || [];
-             for (const opt of qd.Options) opt.correct = chosen.includes(opt.option_id);
+             for (const opt of qd.Options) opt.correct = chosen.includes(opt.option_id) || chosen.includes(opt.original_id);
           } else if (qd.Type === "MULTIPLE_CHOICE") {
              const mChosen = submitted.questionResponse.multipleChoiceResponse?.chosen;
-             for (const opt of qd.Options) opt.correct = (opt.option_id === mChosen);
+             for (const opt of qd.Options) opt.correct = (opt.option_id === mChosen || opt.original_id === mChosen);
           } else {
              const resKeys = Object.keys(submitted.questionResponse);
              if (resKeys.length > 0) {

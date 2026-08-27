@@ -16,41 +16,41 @@ const PROVIDER_CONFIGS = {
       "Content-Type": "application/json",
       "Accept": "application/json"
     }),
-    formatBody: (model, systemPrompt, userPrompt) => ({
-      model: model,
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: userPrompt }
-      ],
-      max_tokens: 8192,
-      temperature: 0.1,
-      chat_template_kwargs: { enable_thinking: false },
-      response_format: {
-        type: "json_schema",
-        json_schema: {
-          name: "quiz_responses",
-          schema: {
-            type: "object",
-            properties: {
-              responses: {
-                type: "array",
-                items: {
-                  type: "object",
-                  properties: {
-                    question_id: { type: "string" },
-                    reasoning: { type: "string" },
-                    chosen: { type: "array", items: { type: "string" } },
-                    answer: { type: "string" }
-                  },
-                  required: ["question_id", "reasoning"]
-                }
-              }
-            },
-            required: ["responses"]
+    formatBody: (model, systemPrompt, userPrompt) => {
+      systemPrompt += "\n\nCRITICAL: You must respond with a valid JSON object matching this schema:\n" + JSON.stringify({
+        type: "object",
+        properties: {
+          responses: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                question_id: { type: "string" },
+                reasoning: { type: "string" },
+                chosen: { type: "array", items: { type: "string" } },
+                answer: { type: "string" }
+              },
+              required: ["question_id", "reasoning"]
+            }
           }
-        }
-      }
-    }),
+        },
+        required: ["responses"]
+      });
+      return {
+        model: model,
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: userPrompt }
+        ],
+        max_tokens: 8192,
+        temperature: 0.0,
+        top_p: 1.0,
+        presence_penalty: 0.0,
+        frequency_penalty: 0.0,
+        chat_template_kwargs: { enable_thinking: false },
+        response_format: { type: "json_object" }
+      };
+    },
     parseResponse: (json) => parseJsonText(json.choices[0].message.content)
   },
   openai: {
@@ -66,7 +66,10 @@ const PROVIDER_CONFIGS = {
         { role: "user", content: userPrompt }
       ],
       max_tokens: 8192,
-      temperature: 0.1,
+      temperature: 0.0,
+      top_p: 1.0,
+      presence_penalty: 0.0,
+      frequency_penalty: 0.0,
       response_format: {
         type: "json_schema",
         json_schema: {
@@ -112,7 +115,8 @@ const PROVIDER_CONFIGS = {
         { role: "user", content: userPrompt + "\n\nPlease respond ONLY with a valid JSON object matching the requested schema." }
       ],
       max_tokens: 8192,
-      temperature: 0.1,
+      temperature: 0.0,
+      top_p: 1.0,
     }),
     parseResponse: (json) => parseJsonText(json.content[0].text)
   },
@@ -125,7 +129,10 @@ const PROVIDER_CONFIGS = {
       systemInstruction: { parts: [{ text: systemPrompt }] },
       contents: [{ parts: [{ text: userPrompt }] }],
       generationConfig: {
-        temperature: 0.1,
+        temperature: 0.0,
+        topP: 1.0,
+        presencePenalty: 0.0,
+        frequencyPenalty: 0.0,
         maxOutputTokens: 8192,
         responseMimeType: "application/json",
       }
