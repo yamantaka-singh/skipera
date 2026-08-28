@@ -271,6 +271,51 @@ export function isPracticeItem(item, materials) {
 /**
  * Fetches lightweight context (readings) from the current module to inject into the LLM prompt.
  */
+const PER_ITEM_CHARS = 3000;
+const TOTAL_CTX_CHARS = 15000;
+const _moduleContextCache = new Map(); // moduleKey -> built context string
+
+async function fetchSupplementText(courseId, itemId) {
+  const res = await fetchCoursera(`onDemandSupplements.v1/${courseId}~${itemId}?includes=asset&fields=value`);
+  if (!res.ok) return "";
+  const data = await res.json();
+  return (data.elements?.[0]?.value || "").replace(/<[^>]*>?/gm, " ").replace(/\s+/g, " ").trim();
+}
+
+// Best-effort video transcript. ponytail: Coursera serves subtitles from its CDN,
+// which is not in host_permissions, so this only succeeds when the subtitle URL is
+// same-origin (older courses / proxied assets). Fails silently otherwise — add the
+// CDN to host_permissions (forces a permission re-prompt) to make it universal.
+async function fetchTranscriptText(courseId, itemId) {
+  try {
+    const res = await fetchCoursera(
+      `onDemandLectureVideos.v1/${courseId}~${itemId}?includes=video&fields=onDemandVideos.v1(subtitles,subtitlesTxt)`
+    );
+    if (!res.ok) return "";
+    const video = (await res.json()).linked?.["onDemandVideos.v1"]?.[0] || {};
+    const map = video.subtitlesTxt || video.subtitles || {};
+    let url = map.en || map["en-US"] || Object.values(map)[0];
+    if (!url) return "";
+    if (url.startsWith("/")) url = "https://www.coursera.org" + url;
+    const txtRes = await fetch(url);
+    if (!txtRes.ok) return "";
+    return vttToText(await txtRes.text());
+  } catch (e) {
+    return "";
+  }
+}
+
+// Strip WEBVTT header, cue numbers, and "00:00:01.000 --> 00:00:04.000" timing
+// lines, leaving just the spoken text. Also fine for plain .txt (a no-op then).
+export function vttToText(raw) {
+  return String(raw || "")
+    .replace(/^WEBVTT.*$/im, "")
+    .replace(/^\d+\s*$/gm, "")
+    .replace(/^[\d:.,]+\s*-->\s*[\d:.,].*$/gm, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 export async function getModuleContext(courseId, currentItemId, materials) {
   try {
     const items = materials?.linked?.["onDemandCourseMaterialItems.v2"] || [];
@@ -283,7 +328,7 @@ export async function getModuleContext(courseId, currentItemId, materials) {
       let moduleItems = [];
       const modLessons = lessons.filter(l => (mod.lessonIds || []).includes(l.id));
       for (const les of modLessons) {
-         moduleItems.push(...(les.elementIds || []));
+        moduleItems.push(...(les.elementIds || []));
       }
       moduleItems = moduleItems.map(id => id.includes("~") ? id.split("~")[1] : id);
       if (moduleItems.includes(currentItemId)) {
@@ -291,30 +336,39 @@ export async function getModuleContext(courseId, currentItemId, materials) {
         break;
       }
     }
-
     if (!itemsInModule.length) return "";
 
-    // Get up to 3 items before the current item
-    const currentIndex = itemsInModule.indexOf(currentItemId);
-    const prevIds = itemsInModule.slice(Math.max(0, currentIndex - 3), currentIndex);
+    // Cache per module so sibling quizzes / retries don't refetch every transcript.
+    const moduleKey = `${courseId}:${itemsInModule[0]}`;
+    if (_moduleContextCache.has(moduleKey)) return _moduleContextCache.get(moduleKey);
 
-    const contextPromises = prevIds.map(async (prevId) => {
+    // All items before this quiz in the module (readings + lectures), in order.
+    const currentIndex = itemsInModule.indexOf(currentItemId);
+    const prevIds = itemsInModule.slice(0, currentIndex);
+
+    const blocks = await Promise.all(prevIds.map(async (prevId) => {
       const itemObj = items.find(i => i.id === prevId);
-      if (!itemObj || itemObj.contentSummary?.typeName !== "supplement") return null;
+      const type = itemObj?.contentSummary?.typeName;
       try {
-        const res = await fetchCoursera(`onDemandSupplements.v1/${courseId}~${prevId}?includes=asset&fields=value`);
-        if (res.ok) {
-          const data = await res.json();
-          const textHtml = data.elements?.[0]?.value || "";
-          const cleanText = textHtml.replace(/<[^>]*>?/gm, ' ').replace(/\s+/g, ' ').trim();
-          if (cleanText) return `--- Reading: ${itemObj.name} ---\n${cleanText.substring(0, 1500)}`;
+        if (type === "supplement") {
+          const t = await fetchSupplementText(courseId, prevId);
+          return t ? `--- Reading: ${itemObj.name} ---\n${t.slice(0, PER_ITEM_CHARS)}` : null;
+        }
+        if (type === "lecture") {
+          const t = await fetchTranscriptText(courseId, prevId);
+          return t ? `--- Lecture: ${itemObj.name} ---\n${t.slice(0, PER_ITEM_CHARS)}` : null;
         }
       } catch (e) {}
       return null;
-    });
+    }));
 
-    const results = await Promise.all(contextPromises);
-    return results.filter(Boolean).join("\n\n");
+    let ctx = "";
+    for (const b of blocks.filter(Boolean)) {
+      if (ctx.length + b.length > TOTAL_CTX_CHARS) break;
+      ctx += (ctx ? "\n\n" : "") + b;
+    }
+    _moduleContextCache.set(moduleKey, ctx);
+    return ctx;
   } catch (err) {
     console.error("Failed to fetch context", err);
     return "";

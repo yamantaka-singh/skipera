@@ -61,7 +61,7 @@ export async function triggerQuizSolver(courseId, itemId, settings, tabId, cours
   
   try {
   
-  let targetGrade = 0.8;
+  let targetGrade = (typeof settings?.targetGrade === "number" && settings.targetGrade > 0) ? settings.targetGrade : 0.8;
   let maxAttempts = 3;
   let attemptsMade = 0;
   
@@ -187,11 +187,12 @@ export async function triggerQuizSolver(courseId, itemId, settings, tabId, cours
       }
     }
 
+    let moduleContext = "";
     if (Object.keys(unsolvedQuestions).length > 0) {
       updateProgress("Calling LLM for unsolved questions...");
-      
-      const moduleContext = materials ? await getModuleContext(courseId, itemId, materials) : "";
-      
+
+      moduleContext = materials ? await getModuleContext(courseId, itemId, materials) : "";
+
       let domainGroups = {};
       for (const [qid, q] of Object.entries(unsolvedQuestions)) {
         const agent = getAgentForType(q.Type);
@@ -252,7 +253,8 @@ function resolveQuestionId(ansQId, domainQuestions, responseIndex) {
         const llmResult = await callLLM(domainQuestions, settings, customPrompt, moduleContext);
         
         if (!llmResult || !llmResult.responses || llmResult.responses.length === 0) {
-          throw new Error(`LLM returned an empty or invalid response format for domain ${domain}.`);
+          console.error(`[Skipera Solver] Empty/invalid LLM response for domain ${domain}; its questions fall through to blank fallback.`);
+          return [];
         }
         
         const domainResponses = [];
@@ -276,9 +278,10 @@ function resolveQuestionId(ansQId, domainQuestions, responseIndex) {
         return domainResponses;
       });
 
-      const allDomainResults = await Promise.all(domainPromises);
-      for (const resList of allDomainResults) {
-        answerResponses.push(...resList);
+      const allDomainResults = await Promise.allSettled(domainPromises);
+      for (const r of allDomainResults) {
+        if (r.status === "fulfilled") answerResponses.push(...r.value);
+        else console.error(`[Skipera Solver] Domain solve rejected:`, r.reason?.message || r.reason);
       }
     } else {
       updateProgress("All questions answered via local cache.");
@@ -299,6 +302,13 @@ function resolveQuestionId(ansQId, domainQuestions, responseIndex) {
           console.error(`Could not format blank payload for ${partId}:`, e);
         }
       }
+    }
+
+    // Per-question diagnostic log: which type, how much context, what we chose.
+    // Pair with the CORRECT/WRONG line in the feedback loop to see where accuracy breaks.
+    for (const r of answerResponses) {
+      const qd = questionsData[r.questionId] || {};
+      console.log(`[Q] attempt=${attemptsMade + 1} id=${r.questionId} type=${r.questionType} ctxChars=${moduleContext.length} prompt="${(qd.Question || "").replace(/\s+/g, " ").slice(0, 140)}" -> ${JSON.stringify(r.questionResponse).slice(0, 200)}`);
     }
 
     // 3. Save Responses
@@ -338,6 +348,7 @@ function resolveQuestionId(ansQId, domainQuestions, responseIndex) {
 
         const isCorrect = fPart.feedback?.correctness === "CORRECT";
         const submitted = answerResponses.find(r => r.questionId === partId);
+        console.log(`[Q] attempt=${attemptsMade + 1} id=${partId} ${isCorrect ? "CORRECT" : "WRONG"} type=${qd.Type} ctxChars=${moduleContext.length}`);
         
         if (!isCorrect && submitted) {
           qd.wrong_attempts = qd.wrong_attempts || [];

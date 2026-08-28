@@ -1,6 +1,35 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { CheckCircle2, XCircle, Clock, AlertCircle, RefreshCw, Terminal } from 'lucide-react';
+import { CheckCircle2, XCircle, Clock, AlertCircle, RefreshCw, Terminal, MinusCircle } from 'lucide-react';
+
+// Merge the store's completed / skipped / error arrays into one time-sorted list.
+function mergeResults(data) {
+  const tag = (arr, kind) => (arr || []).map(e => ({ ...e, kind }));
+  return [
+    ...tag(data?.completedTasks, 'done'),
+    ...tag(data?.skippedTasks, 'skip'),
+    ...tag(data?.errors, 'err'),
+  ].sort((a, b) => (b.time || 0) - (a.time || 0));
+}
+
+const RESULT_STYLE = {
+  done: { Icon: CheckCircle2, cls: 'text-emerald-400' },
+  skip: { Icon: MinusCircle, cls: 'text-yellow-400' },
+  err: { Icon: XCircle, cls: 'text-red-400' },
+};
+
+const ResultRow = ({ item }) => {
+  const { Icon, cls } = RESULT_STYLE[item.kind] || RESULT_STYLE.done;
+  return (
+    <div className="flex items-start gap-1.5 py-0.5">
+      <Icon size={12} className={`${cls} mt-0.5 shrink-0`} />
+      <span className="opacity-40 text-[9px] font-mono shrink-0 mt-0.5">
+        {item.time ? new Date(item.time).toLocaleTimeString([], { hour12: false }) : ''}
+      </span>
+      <span className={`${cls} break-words leading-tight`}>{String(item.msg || '')}</span>
+    </div>
+  );
+};
 
 const LogItem = ({ log }) => {
   const msgStr = String(log.msg || "");
@@ -35,7 +64,8 @@ export default function Dashboard({ courseSlug, onClose }) {
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
   const [activeSlug, setActiveSlug] = useState(courseSlug || "default");
-  
+  const [filter, setFilter] = useState('all'); // all | done | skip | err
+
   const terminalRef = useRef(null);
 
   useEffect(() => {
@@ -164,26 +194,48 @@ export default function Dashboard({ courseSlug, onClose }) {
       ) : (
         <div className="flex flex-col gap-3 h-full overflow-hidden pb-4">
           
-          {/* Top Stats Row */}
+          {/* Top Stats Row — Done/Skip/Errs toggle the results filter below */}
           <div className="grid grid-cols-4 gap-2 shrink-0">
-            {/* Completion Rate */}
-            <div className="col-span-2 p-3 rounded-lg bg-card border border-border shadow-sm flex flex-col items-center justify-center gap-0.5 hover:bg-primary/5 transition-colors">
-              <span className="text-2xl font-bold text-primary">{data?.completionRate || 0}%</span>
-              <span className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider">Completed</span>
+            <div className="col-span-1 p-3 rounded-lg bg-card border border-border shadow-sm flex flex-col items-center justify-center gap-0.5">
+              <span className="text-xl font-bold text-primary">{data?.completionRate || 0}%</span>
+              <span className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider">Course</span>
             </div>
 
-            {/* Completed Count */}
-            <div className="col-span-1 p-3 rounded-lg bg-card border border-border shadow-sm flex flex-col items-center justify-center gap-0.5 hover:bg-primary/5 transition-colors">
-              <span className="text-xl font-bold text-primary">{data?.completedTasks?.length || 0}</span>
-              <span className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider">Done</span>
-            </div>
-
-            {/* Errors */}
-            <div className="col-span-1 p-3 rounded-lg bg-destructive/10 border border-destructive/20 shadow-sm flex flex-col items-center justify-center gap-0.5 group hover:bg-destructive/20 transition-colors">
-              <span className="text-xl font-bold text-destructive">{data?.errors?.length || 0}</span>
-              <span className="text-[10px] font-semibold text-destructive uppercase tracking-wider">Errs</span>
-            </div>
+            {[
+              { k: 'done', label: 'Done', n: data?.completedTasks?.length || 0, cls: 'text-emerald-500', active: 'bg-emerald-500/15 border-emerald-500/40' },
+              { k: 'skip', label: 'Skip', n: data?.skippedTasks?.length || 0, cls: 'text-yellow-500', active: 'bg-yellow-500/15 border-yellow-500/40' },
+              { k: 'err', label: 'Errs', n: data?.errors?.length || 0, cls: 'text-destructive', active: 'bg-destructive/20 border-destructive/40' },
+            ].map(t => (
+              <button
+                key={t.k}
+                type="button"
+                onClick={() => setFilter(f => f === t.k ? 'all' : t.k)}
+                className={`col-span-1 p-3 rounded-lg border shadow-sm flex flex-col items-center justify-center gap-0.5 transition-colors cursor-pointer ${filter === t.k ? t.active : 'bg-card border-border hover:bg-primary/5'}`}
+              >
+                <span className={`text-xl font-bold ${t.cls}`}>{t.n}</span>
+                <span className={`text-[10px] font-semibold uppercase tracking-wider ${filter === t.k ? t.cls : 'text-muted-foreground'}`}>{t.label}</span>
+              </button>
+            ))}
           </div>
+
+          {/* Results — persistent list of what passed / was skipped / errored */}
+          {(() => {
+            const all = mergeResults(data);
+            const rows = filter === 'all' ? all : all.filter(r => r.kind === filter);
+            return (
+              <div className="shrink-0 max-h-36 overflow-y-auto rounded-lg bg-card border border-border shadow-sm p-2 font-mono text-[10px] scrollbar-thin scrollbar-thumb-white/20 scrollbar-track-transparent">
+                <div className="flex items-center justify-between mb-1">
+                  <span className="text-[9px] font-bold text-muted-foreground uppercase tracking-widest">Results{filter !== 'all' ? ` · ${filter}` : ''}</span>
+                  {filter !== 'all' && (
+                    <button type="button" onClick={() => setFilter('all')} className="text-[9px] text-primary hover:underline cursor-pointer">clear</button>
+                  )}
+                </div>
+                {rows.length === 0
+                  ? <div className="text-muted-foreground/50 text-center py-1">Nothing yet</div>
+                  : rows.map((item, i) => <ResultRow key={(item.time || 0) + '-' + i} item={item} />)}
+              </div>
+            );
+          })()}
 
           {/* Active Task */}
           <div className="p-3 rounded-lg bg-card border border-border shadow-sm flex flex-col gap-1 relative overflow-hidden group shrink-0">

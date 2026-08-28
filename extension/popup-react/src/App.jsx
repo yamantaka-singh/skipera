@@ -45,6 +45,7 @@ export default function App() {
   const [apiKey, setApiKey] = useState('');
   const [solveMode, setSolveMode] = useState('full'); // 'full' | 'graded' | 'videos'
   const [skipPractice, setSkipPractice] = useState(true);
+  const [targetGrade, setTargetGrade] = useState(80); // percent
   const [status, setStatus] = useState({ text: 'Ready', state: 'idle' });
   const [theme, setTheme] = useState('theme-earth'); // Default theme
   const [showDashboard, setShowDashboard] = useState(false);
@@ -122,11 +123,12 @@ export default function App() {
   // 2. Load settings and course-specific completion rate
   useEffect(() => {
     if (window.chrome && chrome.storage) {
-      chrome.storage.local.get(['apiKey', 'provider', 'modelName', 'theme', 'dashboardStates', 'skipPractice', 'solveMode'], (result) => {
+      chrome.storage.local.get(['apiKey', 'provider', 'modelName', 'theme', 'dashboardStates', 'skipPractice', 'solveMode', 'targetGrade'], (result) => {
         if (result.apiKey) setApiKey(result.apiKey);
         if (result.theme) setTheme(result.theme);
         if (result.skipPractice !== undefined) setSkipPractice(result.skipPractice);
         if (result.solveMode) setSolveMode(result.solveMode);
+        if (typeof result.targetGrade === 'number') setTargetGrade(result.targetGrade);
         if (result.provider) {
           setProvider(result.provider);
           const validList = modelOptions[result.provider] || [];
@@ -157,9 +159,9 @@ export default function App() {
 
   useEffect(() => {
     if (window.chrome && chrome.storage) {
-      chrome.storage.local.set({ apiKey, provider, modelName, theme, skipPractice, solveMode });
+      chrome.storage.local.set({ apiKey, provider, modelName, theme, skipPractice, solveMode, targetGrade });
     }
-  }, [apiKey, provider, modelName, theme, skipPractice, solveMode]);
+  }, [apiKey, provider, modelName, theme, skipPractice, solveMode, targetGrade]);
 
   const handleProviderChange = (e) => {
     const newProv = e.target.value;
@@ -335,13 +337,14 @@ export default function App() {
 
         const response = await chrome.tabs.sendMessage(targetTab.id, {
           action: action,
-          settings: { 
-            apiKey, 
-            provider, 
-            modelName, 
+          settings: {
+            apiKey,
+            provider,
+            modelName,
             videosOnly: isVideosOnly,
             gradedOnly: isGradedOnlyAction,
-            skipPractice: skipPractice
+            skipPractice: skipPractice,
+            targetGrade: targetGrade / 100
           }
         });
         
@@ -668,13 +671,29 @@ export default function App() {
                     Only solve graded assessments, skip formative practice exercises
                   </span>
                 </div>
-                <input 
+                <input
                   type="checkbox"
                   checked={skipPractice}
                   onChange={(e) => setSkipPractice(e.target.checked)}
                   className="w-4 h-4 rounded border-input text-primary focus:ring-primary/20 accent-primary cursor-pointer"
                 />
               </label>
+
+              {/* Target Grade */}
+              <div className="mt-2 p-2.5 rounded-xl bg-background/40 border border-input/60">
+                <div className="flex items-center justify-between mb-1.5">
+                  <span className="text-[11.5px] font-semibold text-foreground">Target Grade</span>
+                  <span className="text-[11.5px] font-bold text-primary tabular-nums">{targetGrade}%</span>
+                </div>
+                <input
+                  type="range"
+                  min="50" max="100" step="5"
+                  value={targetGrade}
+                  onChange={(e) => setTargetGrade(Number(e.target.value))}
+                  className="w-full accent-primary cursor-pointer"
+                />
+                <span className="text-[9.5px] text-muted-foreground">Retry graded quizzes until they hit this score (max 3 attempts)</span>
+              </div>
             </div>
           </div>
 
