@@ -3,8 +3,6 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { CheckCircle2, XCircle, Clock, AlertCircle, RefreshCw, Terminal } from 'lucide-react';
 
 const LogItem = ({ log }) => {
-  const [visible, setVisible] = useState(true);
-  
   const msgStr = String(log.msg || "");
   const isError = log.type === "error" || msgStr.includes("ERROR") || msgStr.includes("Failed") || msgStr.includes("Error");
   const isWarning = log.type === "skip" || msgStr.includes("Skipping");
@@ -14,13 +12,6 @@ const LogItem = ({ log }) => {
     msgStr.includes("successfully") || 
     msgStr.includes("Finished");
   
-  useEffect(() => {
-    // ONLY completed / finished items Thanos snap out of existence
-    if (!isCompleted) return;
-    const timer = setTimeout(() => setVisible(false), 3500);
-    return () => clearTimeout(timer);
-  }, [isCompleted]);
-
   let colorClass = "text-green-400";
   if (isError) colorClass = "text-red-400 font-semibold";
   else if (isWarning) colorClass = "text-yellow-400";
@@ -30,27 +21,12 @@ const LogItem = ({ log }) => {
   }
 
   return (
-    <AnimatePresence>
-      {visible && (
-        <motion.div
-          layout
-          initial={{ opacity: 0, x: -5, filter: "blur(2px)" }}
-          animate={{ opacity: 1, x: 0, filter: "blur(0px)" }}
-          exit={{ 
-            opacity: 0, 
-            scale: 0.9,
-            filter: "blur(8px)",
-            x: Math.random() * 20 - 10,
-            y: Math.random() * -15 - 5,
-            transition: { duration: 0.7, ease: "easeIn" } 
-          }}
-          className={`break-words ${colorClass}`}
-        >
-          <span className="opacity-50 mr-2 text-[9px]">{new Date(log.time).toLocaleTimeString([], { hour12: false })}</span>
-          {msgStr}
-        </motion.div>
-      )}
-    </AnimatePresence>
+    <div className={`break-words ${colorClass} py-0.5 animate-fadeIn`}>
+      <span className="opacity-50 mr-2 text-[9px] font-mono">
+        {log.time ? new Date(log.time).toLocaleTimeString([], { hour12: false }) : ""}
+      </span>
+      {msgStr}
+    </div>
   );
 };
 
@@ -58,46 +34,83 @@ export default function Dashboard({ courseSlug, onClose }) {
   const [loading, setLoading] = useState(true);
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
+  const [activeSlug, setActiveSlug] = useState(courseSlug || "default");
   
   const terminalRef = useRef(null);
-  const safeSlug = courseSlug || "default";
 
   useEffect(() => {
-    // 1. Fetch initial state for THIS course
-    chrome.storage.local.get(["dashboardStates"], (res) => {
-      const courseState = res.dashboardStates?.[safeSlug];
-      if (courseState) {
-        setData(courseState);
-      } else {
-        setData({
-          courseSlug: safeSlug,
-          completionRate: 0,
-          activeTask: { title: "Idle", timeElapsed: "00:00" },
-          completedTasks: [],
-          skippedTasks: [],
-          errors: [],
-          logs: []
-        });
+    const findBestState = (dashboardStates, targetSlug) => {
+      if (!dashboardStates || typeof dashboardStates !== "object") return null;
+      if (targetSlug && targetSlug !== "default" && dashboardStates[targetSlug]) {
+        return { state: dashboardStates[targetSlug], slug: targetSlug };
       }
-      setLoading(false);
-    });
+      // If targetSlug is default or not found, pick the most active course state
+      const entries = Object.entries(dashboardStates);
+      if (entries.length === 0) return null;
+      // Sort by latest log timestamp or start time
+      entries.sort((a, b) => {
+        const timeA = a[1].logs?.[a[1].logs.length - 1]?.time || a[1].startTime || 0;
+        const timeB = b[1].logs?.[b[1].logs.length - 1]?.time || b[1].startTime || 0;
+        return timeB - timeA;
+      });
+      return { state: entries[0][1], slug: entries[0][0] };
+    };
 
-    // 2. Listen for live updates for THIS course
-    const messageListener = (msg) => {
-      if (msg.action === "DASHBOARD_UPDATE") {
-        if (!msg.slug || msg.slug === safeSlug) {
-          setData(msg.state);
+    // 1. Fetch initial state from storage
+    if (window.chrome && chrome.storage) {
+      chrome.storage.local.get(["dashboardStates"], (res) => {
+        const found = findBestState(res.dashboardStates, courseSlug);
+        if (found) {
+          setData(found.state);
+          setActiveSlug(found.slug);
+        } else {
+          setData({
+            courseSlug: courseSlug || "default",
+            completionRate: 0,
+            activeTask: { title: "Idle", timeElapsed: "00:00" },
+            completedTasks: [],
+            skippedTasks: [],
+            errors: [],
+            logs: []
+          });
         }
-      }
-    };
-    chrome.runtime.onMessage.addListener(messageListener);
+        setLoading(false);
+      });
 
-    return () => {
-      chrome.runtime.onMessage.removeListener(messageListener);
-    };
-  }, [safeSlug]);
+      // 2. Listen for live runtime broadcast messages
+      const messageListener = (msg) => {
+        if (msg.action === "DASHBOARD_UPDATE") {
+          if (!courseSlug || courseSlug === "default" || !msg.slug || msg.slug === courseSlug || msg.slug === activeSlug) {
+            setData(msg.state);
+            if (msg.slug) setActiveSlug(msg.slug);
+            setLoading(false);
+          }
+        }
+      };
+      chrome.runtime.onMessage.addListener(messageListener);
 
-  // Auto-scroll terminal
+      // 3. Listen for chrome.storage.onChanged as fallback
+      const storageListener = (changes, areaName) => {
+        if (areaName === "local" && changes.dashboardStates?.newValue) {
+          const found = findBestState(changes.dashboardStates.newValue, courseSlug || activeSlug);
+          if (found) {
+            setData(found.state);
+            if (found.slug) setActiveSlug(found.slug);
+          }
+        }
+      };
+      chrome.storage.onChanged.addListener(storageListener);
+
+      return () => {
+        chrome.runtime.onMessage.removeListener(messageListener);
+        chrome.storage.onChanged.removeListener(storageListener);
+      };
+    } else {
+      setLoading(false);
+    }
+  }, [courseSlug]);
+
+  // Auto-scroll terminal on new logs
   useEffect(() => {
     if (terminalRef.current) {
       terminalRef.current.scrollTop = terminalRef.current.scrollHeight;

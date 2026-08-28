@@ -440,8 +440,34 @@ class GradedSolver(object):
                     llm_result = connector.get_response(
                         domain_questions, system_prompt=custom_prompt, response_schema=DEFAULT_RESPONSE_SCHEMA)
                     
-                    for ans in llm_result.get("responses", []):
-                        ans_type = domain_questions[ans["question_id"]]["Type"]
+                    def resolve_qid(raw_id, questions, idx):
+                        if not questions:
+                            return None
+                        keys = list(questions.keys())
+                        if raw_id in questions:
+                            return raw_id
+                        clean = str(raw_id).strip().lower()
+                        for k in keys:
+                            if k.strip().lower() == clean:
+                                return k
+                        digits = re.findall(r'\d+', clean)
+                        if digits:
+                            num = int(digits[0])
+                            if 1 <= num <= len(keys):
+                                return keys[num - 1]
+                            if 0 <= num < len(keys):
+                                return keys[num]
+                        if idx is not None and 0 <= idx < len(keys):
+                            return keys[idx]
+                        if len(keys) == 1:
+                            return keys[0]
+                        return None
+
+                    for idx, ans in enumerate(llm_result.get("responses", [])):
+                        matched_qid = resolve_qid(ans.get("question_id"), domain_questions, idx)
+                        if not matched_qid or matched_qid not in domain_questions:
+                            continue
+                        ans_type = domain_questions[matched_qid]["Type"]
                         chosen = ans.get("chosen")
                         answer = ans.get("answer")
                         
@@ -482,7 +508,7 @@ class GradedSolver(object):
                         if ans_type == "MULTIPLE_CHOICE" and isinstance(chosen, list) and len(chosen) > 0:
                             # Fuzzy match option text back to option ID if LLM hallucinates text instead of ID
                             opt_id = str(chosen[0])
-                            opts = domain_questions[ans["question_id"]].get("Options", [])
+                            opts = domain_questions[matched_qid].get("Options", [])
                             if not any(o["option_id"] == opt_id for o in opts):
                                 # ID not found, check if it's text
                                 for o in opts:
@@ -494,7 +520,7 @@ class GradedSolver(object):
                             mapped_chosen = []
                             for c in chosen:
                                 c_str = str(c)
-                                opt_obj = next((o for o in domain_questions[ans["question_id"]]["Options"] if o["option_id"] == c_str), None)
+                                opt_obj = next((o for o in domain_questions[matched_qid]["Options"] if o["option_id"] == c_str), None)
                                 if opt_obj and "original_id" in opt_obj:
                                     mapped_chosen.append(opt_obj["original_id"])
                                 else:
@@ -502,7 +528,7 @@ class GradedSolver(object):
                             chosen = mapped_chosen
 
                         answer_responses.append(self._format_response(
-                            part_id=ans["question_id"],
+                            part_id=matched_qid,
                             q_type=ans_type, # Don't trust the LLM to echo back question_type
                             chosen=chosen,
                             answer=answer

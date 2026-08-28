@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Settings2, KeyRound, Sparkles, BrainCircuit, Play, LayoutGrid, Palette, Atom, Pin, FastForward } from 'lucide-react';
+import { Settings2, KeyRound, Sparkles, BrainCircuit, Palette, Atom, Pin, FastForward, GraduationCap } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Button } from './components/Button';
 import { AuthorCard } from './components/AuthorCard';
@@ -9,31 +9,33 @@ import Dashboard from './components/Dashboard';
 const modelOptions = {
   nvidia: [
     "nvidia/nemotron-3-ultra-550b-a55b",
-    "nvidia/nemotron-4-340b-instruct",
+    "nvidia/nemotron-3-super-120b-a12b",
+    "deepseek-ai/deepseek-v4-flash-0731",
     "nvidia/nemotron-3.5-lightning-30b-a3b"
   ],
   openai: [
-    "gpt-4o",
     "gpt-4o-mini",
-    "o1-mini",
-    "o1-preview"
+    "gpt-4o",
+    "o3-mini",
+    "o1-mini"
   ],
   anthropic: [
-    "claude-3-5-sonnet-latest",
-    "claude-3-opus-20240229",
+    "claude-3-5-sonnet-20241022",
+    "claude-3-5-haiku-20241022",
     "claude-3-haiku-20240307"
   ],
   gemini: [
-    "gemini-1.5-pro",
     "gemini-1.5-flash",
-    "gemini-1.5-flash-8b"
+    "gemini-1.5-pro",
+    "gemini-2.0-flash",
+    "gemini-2.0-flash-lite"
   ]
 };
 
 const defaultModels = {
   nvidia: "nvidia/nemotron-3-ultra-550b-a55b",
   openai: "gpt-4o-mini",
-  anthropic: "claude-3-5-sonnet-latest",
+  anthropic: "claude-3-5-sonnet-20241022",
   gemini: "gemini-1.5-flash"
 };
 
@@ -41,6 +43,8 @@ export default function App() {
   const [provider, setProvider] = useState('nvidia');
   const [modelName, setModelName] = useState(defaultModels.nvidia);
   const [apiKey, setApiKey] = useState('');
+  const [solveMode, setSolveMode] = useState('full'); // 'full' | 'graded' | 'videos'
+  const [skipPractice, setSkipPractice] = useState(true);
   const [status, setStatus] = useState({ text: 'Ready', state: 'idle' });
   const [theme, setTheme] = useState('theme-earth'); // Default theme
   const [showDashboard, setShowDashboard] = useState(false);
@@ -48,6 +52,7 @@ export default function App() {
   const [courseSlug, setCourseSlug] = useState('');
   const [hoveredBtn, setHoveredBtn] = useState(null);
 
+  const hasKey = apiKey.trim().length > 0;
   const isStickyMode = typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('sticky') === 'true';
 
   useEffect(() => {
@@ -117,12 +122,18 @@ export default function App() {
   // 2. Load settings and course-specific completion rate
   useEffect(() => {
     if (window.chrome && chrome.storage) {
-      chrome.storage.local.get(['apiKey', 'provider', 'modelName', 'theme', 'dashboardStates'], (result) => {
+      chrome.storage.local.get(['apiKey', 'provider', 'modelName', 'theme', 'dashboardStates', 'skipPractice', 'solveMode'], (result) => {
         if (result.apiKey) setApiKey(result.apiKey);
         if (result.theme) setTheme(result.theme);
+        if (result.skipPractice !== undefined) setSkipPractice(result.skipPractice);
+        if (result.solveMode) setSolveMode(result.solveMode);
         if (result.provider) {
           setProvider(result.provider);
-          setModelName(result.modelName || defaultModels[result.provider]);
+          const validList = modelOptions[result.provider] || [];
+          const effective = result.modelName && validList.includes(result.modelName)
+            ? result.modelName
+            : defaultModels[result.provider];
+          setModelName(effective);
         }
         if (courseSlug && result.dashboardStates?.[courseSlug]) {
           setCompletionRate(result.dashboardStates[courseSlug].completionRate || 0);
@@ -146,9 +157,9 @@ export default function App() {
 
   useEffect(() => {
     if (window.chrome && chrome.storage) {
-      chrome.storage.local.set({ apiKey, provider, modelName, theme });
+      chrome.storage.local.set({ apiKey, provider, modelName, theme, skipPractice, solveMode });
     }
-  }, [apiKey, provider, modelName, theme]);
+  }, [apiKey, provider, modelName, theme, skipPractice, solveMode]);
 
   const handleProviderChange = (e) => {
     const newProv = e.target.value;
@@ -182,8 +193,6 @@ export default function App() {
 
     transition.ready.then(() => {
       if (nextTheme === 'theme-fire') {
-        // Fire Theme: Deep Z-Axis Push (iOS App Switcher Style)
-        // Old view shrinks and blurs backward, new view scales down and snaps into focus
         document.documentElement.animate(
           {
             filter: ['blur(0px)', 'blur(12px)'],
@@ -201,8 +210,6 @@ export default function App() {
           { duration: 600, easing: 'cubic-bezier(0.32, 0.72, 0, 1)', pseudoElement: '::view-transition-new(root)' }
         );
       } else if (nextTheme === 'theme-sage') {
-        // Sage Theme: Parallax Navigation Glide (iOS Settings Push)
-        // Smooth horizontal slide with a parallax trailing effect
         document.documentElement.animate(
           {
             opacity: [1, 0],
@@ -218,8 +225,6 @@ export default function App() {
           { duration: 500, easing: 'cubic-bezier(0.32, 0.72, 0, 1)', pseudoElement: '::view-transition-new(root)' }
         );
       } else {
-        // Earth Theme: Spring Modal Pop (iOS Sheet Presentation)
-        // New view pops up from the bottom slightly and settles into place
         document.documentElement.animate(
           {
             opacity: [1, 0],
@@ -238,13 +243,71 @@ export default function App() {
     });
   };
 
+  const getHeroConfig = () => {
+    if (!hasKey) {
+      return {
+        action: 'START_VIDEOS_ONLY',
+        title: 'Fast-Forward Videos & Readings',
+        badge: 'No Key Needed',
+        icon: <FastForward size={16} />,
+        subtitle: 'Auto-completes lectures and readings instantly',
+        variant: 'primary'
+      };
+    }
+
+    if (solveMode === 'graded') {
+      return {
+        action: 'START_GRADED_ONLY',
+        title: 'Auto-Solve Graded Items',
+        badge: 'Graded Only',
+        icon: <GraduationCap size={16} />,
+        subtitle: 'Skips videos and solves graded quizzes with AI',
+        variant: 'primary'
+      };
+    }
+
+    if (solveMode === 'videos') {
+      return {
+        action: 'START_VIDEOS_ONLY',
+        title: 'Fast-Forward Videos & Readings',
+        badge: 'Fast-Forward',
+        icon: <FastForward size={16} />,
+        subtitle: 'Bypasses video and reading material only',
+        variant: 'secondary'
+      };
+    }
+
+    // Default: Full course
+    return {
+      action: 'START_FULL_COURSE_SOLVER',
+      title: 'Auto-Solve Entire Course',
+      badge: 'Full Auto (AI)',
+      icon: <Sparkles size={16} className="text-amber-300 animate-pulse" />,
+      subtitle: 'Fast-forwards videos & answers quizzes with AI',
+      variant: 'primary'
+    };
+  };
+
+  const heroConfig = getHeroConfig();
+
+  const handleHeroClick = () => {
+    executeSolver(heroConfig.action);
+  };
+
   const executeSolver = async (action) => {
     const isVideosOnly = action === 'START_VIDEOS_ONLY' || !apiKey.trim();
+    const isGradedOnlyAction = action === 'START_GRADED_ONLY' || solveMode === 'graded';
     
     if (action === 'START_FULL_COURSE_SOLVER' && !apiKey.trim()) {
       setStatus({ text: "No API Key: Running Videos & Readings only", state: "working" });
     } else if (action === 'START_VIDEOS_ONLY') {
       setStatus({ text: "Fast-forwarding videos & readings...", state: "working" });
+    } else if (action === 'START_GRADED_ONLY' || isGradedOnlyAction) {
+      if (!apiKey.trim()) {
+        setStatus({ text: "Error: API Key required for AI quiz solver", state: "error" });
+        return;
+      }
+      setStatus({ text: "Solving graded assessments only...", state: "working" });
     } else if (!apiKey.trim()) {
       setStatus({ text: "Error: API Key required for AI quiz solver", state: "error" });
       return;
@@ -276,7 +339,9 @@ export default function App() {
             apiKey, 
             provider, 
             modelName, 
-            videosOnly: isVideosOnly 
+            videosOnly: isVideosOnly,
+            gradedOnly: isGradedOnlyAction,
+            skipPractice: skipPractice
           }
         });
         
@@ -341,7 +406,7 @@ export default function App() {
       <div className="absolute top-[-20%] left-[-20%] w-[60%] h-[50%] bg-accent rounded-full blur-[60px] opacity-40 mix-blend-multiply pointer-events-none" />
       <div className="absolute bottom-[-20%] right-[-10%] w-[70%] h-[60%] bg-primary rounded-full blur-[80px] opacity-10 mix-blend-multiply pointer-events-none" />
 
-      <main className="relative z-10 flex flex-col flex-1 mt-6 md:mt-10 gap-6 md:grid md:grid-cols-12 md:items-start">
+      <div className="relative z-10 flex flex-col flex-1 mt-2">
         
         {/* Header */}
         <header className="flex items-center justify-between md:col-span-12 mb-3 md:mb-6">
@@ -403,6 +468,7 @@ export default function App() {
               </AnimatePresence>
             </div>
 
+            {/* 2. Completion Percentage / Dashboard Button */}
             {/* 2. Completion Percentage / Dashboard Button */}
             <div className="relative flex flex-col items-center">
               <motion.button 
@@ -473,9 +539,12 @@ export default function App() {
               </AnimatePresence>
             </div>
 
-          </div>
-        </header>
+        </div>
+      </header>
 
+      {/* Responsive Content Grid */}
+      <main className="grid grid-cols-1 md:grid-cols-12 gap-4 flex-1 items-start mt-4 pb-4">
+        
         {/* Form Container */}
         <div className="flex flex-col gap-4 bg-card backdrop-blur-xl rounded-2xl p-5 md:p-6 border border-border shadow-sm flex-1 md:col-span-7 lg:col-span-8 h-full">
           
@@ -516,73 +585,211 @@ export default function App() {
             </div>
           </div>
 
-          {/* API Key */}
+          {/* API Key Input with Cool Dynamic Unlocking Animation */}
           <div className="flex flex-col gap-1.5">
-            <div className="flex justify-between items-end">
+            <div className="flex justify-between items-center">
               <label className="text-[10.5px] font-bold text-muted-foreground uppercase tracking-widest flex items-center gap-1.5 ml-0.5">
-                <KeyRound size={13} /> API Key <span className="text-[9px] font-medium text-muted-foreground/70 lowercase tracking-normal">(optional for videos & readings)</span>
+                <KeyRound size={13} /> API Key
+              </label>
+              <AnimatePresence mode="wait">
+                {hasKey ? (
+                  <motion.span
+                    key="ai-unlocked"
+                    initial={{ opacity: 0, scale: 0.7, y: -2 }}
+                    animate={{ opacity: 1, scale: 1, y: 0 }}
+                    exit={{ opacity: 0, scale: 0.7 }}
+                    transition={{ type: "spring", stiffness: 500, damping: 20 }}
+                    className="text-[9.5px] font-extrabold text-primary flex items-center gap-1 bg-primary/10 px-2.5 py-0.5 rounded-full border border-primary/25 shadow-xs"
+                  >
+                    <Sparkles size={11} className="text-primary animate-pulse" />
+                    AI Powerhouse Unlocked
+                  </motion.span>
+                ) : (
+                  <motion.span
+                    key="videos-mode"
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                    exit={{ opacity: 0 }}
+                    className="text-[9px] font-medium text-muted-foreground/70 lowercase tracking-normal"
+                  >
+                    (optional for fast-forward)
+                  </motion.span>
+                )}
+              </AnimatePresence>
+            </div>
+            <div className="relative">
+              <motion.div
+                animate={{
+                  boxShadow: hasKey 
+                    ? "0 0 15px -3px var(--color-primary, rgba(99, 102, 241, 0.2))" 
+                    : "none"
+                }}
+                className="rounded-xl transition-all"
+              >
+                <textarea 
+                  rows={2}
+                  className={`w-full bg-background/50 border ${
+                    hasKey ? 'border-primary/50 text-foreground ring-1 ring-primary/25' : 'border-input text-foreground'
+                  } text-[11.5px] font-mono rounded-xl px-3 py-2.5 outline-none focus:border-ring focus:ring-2 focus:ring-ring/20 transition-all shadow-sm resize-none`}
+                  placeholder="nvapi-... or sk-... (Leave blank for Fast-Forward only)"
+                  value={apiKey}
+                  onChange={(e) => setApiKey(e.target.value)}
+                />
+              </motion.div>
+              <AnimatePresence>
+                {hasKey && (
+                  <motion.div 
+                    initial={{ opacity: 0, scale: 0 }} 
+                    animate={{ opacity: 1, scale: 1 }} 
+                    exit={{ opacity: 0, scale: 0 }}
+                    className="absolute top-2.5 right-2.5 pointer-events-none flex items-center gap-1 bg-background/85 backdrop-blur-xs px-1.5 py-0.5 rounded-md border border-border"
+                  >
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                    <span className="text-[8.5px] font-bold text-muted-foreground uppercase tracking-wider">Active</span>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+            </div>
+          </div>
+
+          {/* Assessment Preferences */}
+          <div className="flex flex-col gap-2 pt-1 border-t border-border/50">
+            <label className="text-[10px] font-bold text-muted-foreground uppercase tracking-widest flex items-center gap-1.5 ml-0.5">
+              <GraduationCap size={13} /> Preferences
+            </label>
+            <div>
+              {/* Skip Practice Toggle */}
+              <label className="flex items-center justify-between p-2.5 rounded-xl bg-background/40 border border-input/60 hover:border-primary/30 transition-all cursor-pointer select-none">
+                <div className="flex flex-col pr-2">
+                  <span className="text-[11.5px] font-semibold text-foreground flex items-center gap-1.5">
+                    Skip Practice Quizzes
+                  </span>
+                  <span className="text-[9.5px] text-muted-foreground">
+                    Only solve graded assessments, skip formative practice exercises
+                  </span>
+                </div>
+                <input 
+                  type="checkbox"
+                  checked={skipPractice}
+                  onChange={(e) => setSkipPractice(e.target.checked)}
+                  className="w-4 h-4 rounded border-input text-primary focus:ring-primary/20 accent-primary cursor-pointer"
+                />
               </label>
             </div>
-            <textarea 
-              rows={2}
-              className="w-full bg-background/50 border border-input text-foreground text-[11.5px] font-mono rounded-xl px-3 py-2.5 outline-none focus:border-ring focus:ring-2 focus:ring-ring/20 transition-all shadow-sm resize-none"
-              placeholder="nvapi-... or sk-... (Leave blank for Videos/Readings only)"
-              value={apiKey}
-              onChange={(e) => setApiKey(e.target.value)}
-            />
           </div>
 
         </div>
 
         {/* Actions & Status Container */}
         <div className="flex flex-col gap-4 md:col-span-5 lg:col-span-4 h-full">
-          {/* Action Buttons */}
-          <div className="flex flex-col gap-3 bg-card/50 backdrop-blur-xl rounded-2xl p-5 md:p-6 border border-border/50 shadow-sm">
-            <Button 
-              variant="primary" 
-              onClick={() => executeSolver('START_VIDEOS_ONLY')}
-              icon={<FastForward size={16} />}
-            >
-              <div className="flex items-center justify-between w-full">
-                <span>Fast-Forward Videos & Readings</span>
-                <span className="text-[9px] font-extrabold uppercase px-1.5 py-0.5 rounded bg-primary-foreground/20 text-primary-foreground tracking-wider ml-1">
-                  No Key Needed
-                </span>
+          
+          {/* Main Action Card */}
+          <div className="flex flex-col gap-3.5 bg-card/60 backdrop-blur-xl rounded-2xl p-4 sm:p-5 border border-border shadow-sm">
+            
+            {/* Mode Segmented Control */}
+            <div className="flex flex-col gap-2">
+              <div className="flex justify-between items-center px-0.5">
+                <label className="text-[10px] font-bold text-muted-foreground uppercase tracking-widest">
+                  Run Mode
+                </label>
+                {!hasKey && (
+                  <span className="text-[9px] text-amber-500 font-semibold lowercase">
+                    Key unlocks AI
+                  </span>
+                )}
               </div>
-            </Button>
-            <Button 
-              variant="secondary" 
-              onClick={() => executeSolver('START_FULL_COURSE_SOLVER')}
-              icon={<Sparkles size={16} />}
+
+              <div className="grid grid-cols-3 p-1 bg-background/60 backdrop-blur-md rounded-xl border border-input/60 gap-1 relative">
+                {[
+                  { id: 'full', label: 'Full Course', icon: <Sparkles size={12} />, requiresKey: true },
+                  { id: 'graded', label: 'Graded Only', icon: <GraduationCap size={12} />, requiresKey: true },
+                  { id: 'videos', label: 'Fast-Forward', icon: <FastForward size={12} />, requiresKey: false }
+                ].map((mode) => {
+                  const isSelected = solveMode === mode.id;
+                  const isLocked = mode.requiresKey && !hasKey;
+                  return (
+                    <button
+                      key={mode.id}
+                      type="button"
+                      onClick={() => setSolveMode(mode.id)}
+                      className={`relative z-10 flex flex-col items-center justify-center gap-1 py-1.5 px-1 rounded-lg text-[10px] font-bold transition-all cursor-pointer ${
+                        isSelected 
+                          ? 'text-primary-foreground' 
+                          : isLocked 
+                            ? 'text-muted-foreground/60 hover:text-muted-foreground' 
+                            : 'text-muted-foreground hover:text-foreground'
+                      }`}
+                    >
+                      {isSelected && (
+                        <motion.div
+                          layoutId="activePill"
+                          className="absolute inset-0 bg-primary rounded-lg shadow-sm -z-10"
+                          transition={{ type: "spring", stiffness: 450, damping: 35 }}
+                        />
+                      )}
+                      <span className="flex items-center gap-1">
+                        {mode.icon}
+                        <span>{mode.label}</span>
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Single Smart Hero Action Button */}
+            <motion.div
+              key={`${solveMode}-${hasKey}`}
+              initial={{ scale: 0.98, opacity: 0.8 }}
+              animate={{ scale: 1, opacity: 1 }}
+              transition={{ type: "spring", stiffness: 400, damping: 25 }}
+              className="pt-1"
             >
-              Auto-Solve Entire Course (with AI)
-            </Button>
+              <Button 
+                variant={heroConfig.variant} 
+                onClick={handleHeroClick}
+                icon={heroConfig.icon}
+              >
+                <div className="flex items-center justify-between w-full">
+                  <div className="flex flex-col text-left">
+                    <span className="font-bold text-[12.5px] leading-tight">{heroConfig.title}</span>
+                    <span className="text-[9px] font-normal text-primary-foreground/75 leading-tight mt-0.5">
+                      {heroConfig.subtitle}
+                    </span>
+                  </div>
+                  <span className="text-[8.5px] font-extrabold uppercase px-2 py-0.5 rounded-full bg-primary-foreground/20 text-primary-foreground tracking-wider ml-2 shrink-0">
+                    {heroConfig.badge}
+                  </span>
+                </div>
+              </Button>
+            </motion.div>
+
           </div>
 
-        {/* Status Indicator */}
-        <AnimatePresence>
-          {status.state !== 'idle' && (
-            <motion.div 
-              initial={{ opacity: 0, height: 0, marginTop: 0 }}
-              animate={{ opacity: 1, height: 'auto', marginTop: 12 }}
-              exit={{ opacity: 0, height: 0, marginTop: 0 }}
-              className="overflow-hidden"
-            >
-              <div className="flex items-center gap-2.5 bg-card border border-border rounded-lg px-3 py-2 text-[11.5px] font-medium text-foreground shadow-sm">
-                <div className="relative flex items-center justify-center shrink-0">
-                  <div className={`w-2 h-2 rounded-full ${status.state === 'error' ? 'bg-destructive' : 'bg-primary'}`} />
-                  {status.state === 'working' && (
-                    <motion.div 
-                      className="absolute inset-0 rounded-full bg-primary"
-                      animate={{ scale: [1, 2.5], opacity: [0.5, 0] }}
-                      transition={{ duration: 1.2, repeat: Infinity, ease: "easeOut" }}
-                    />
-                  )}
+          {/* Status Indicator */}
+          <AnimatePresence>
+            {status.state !== 'idle' && (
+              <motion.div 
+                initial={{ opacity: 0, height: 0, marginTop: 0 }}
+                animate={{ opacity: 1, height: 'auto', marginTop: 8 }}
+                exit={{ opacity: 0, height: 0, marginTop: 0 }}
+                className="overflow-hidden"
+              >
+                <div className="flex items-center gap-2.5 bg-card border border-border rounded-lg px-3 py-2 text-[11.5px] font-medium text-foreground shadow-sm">
+                  <div className="relative flex items-center justify-center shrink-0">
+                    <div className={`w-2 h-2 rounded-full ${status.state === 'error' ? 'bg-destructive' : 'bg-primary'}`} />
+                    {status.state === 'working' && (
+                      <motion.div 
+                        className="absolute inset-0 rounded-full bg-primary"
+                        animate={{ scale: [1, 2.5], opacity: [0.5, 0] }}
+                        transition={{ duration: 1.2, repeat: Infinity, ease: "easeOut" }}
+                      />
+                    )}
+                  </div>
+                  <span className="truncate">{status.text}</span>
                 </div>
-                <span className="truncate">{status.text}</span>
-              </div>
-            </motion.div>
-          )}
+              </motion.div>
+            )}
           </AnimatePresence>
         </div>
 
@@ -596,6 +803,7 @@ export default function App() {
           <AuthorCard name="Mrityunjay" role="Extension & Engine" username="yamantaka-singh" />
         </div>
       </footer>
+      </div>
     </div>
   );
 }

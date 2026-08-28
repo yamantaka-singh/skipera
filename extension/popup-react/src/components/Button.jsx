@@ -29,6 +29,10 @@ export function Button({
   
   const rotateX = useTransform(mouseYSpring, [-0.5, 0.5], ["7deg", "-7deg"]);
   const rotateY = useTransform(mouseXSpring, [-0.5, 0.5], ["-7deg", "7deg"]);
+  const iconX = useTransform(mouseXSpring, [-0.5, 0.5], [-3, 3]);
+  const iconY = useTransform(mouseYSpring, [-0.5, 0.5], [-3, 3]);
+  const textX = useTransform(mouseXSpring, [-0.5, 0.5], [-2, 2]);
+  const textY = useTransform(mouseYSpring, [-0.5, 0.5], [-2, 2]);
   
   const handleMouseMove = (e) => {
     const rect = e.currentTarget.getBoundingClientRect();
@@ -64,8 +68,8 @@ export function Button({
       {...props}
     >
       <div className="relative z-10 flex items-center justify-center gap-2 pointer-events-none">
-        {icon && <motion.span style={{ x: useTransform(mouseXSpring, [-0.5, 0.5], [-3, 3]), y: useTransform(mouseYSpring, [-0.5, 0.5], [-3, 3]) }} className="flex-shrink-0">{icon}</motion.span>}
-        <motion.span style={{ x: useTransform(mouseXSpring, [-0.5, 0.5], [-2, 2]), y: useTransform(mouseYSpring, [-0.5, 0.5], [-2, 2]) }}>{children}</motion.span>
+        {icon && <motion.span style={{ x: iconX, y: iconY }} className="flex-shrink-0">{icon}</motion.span>}
+        <motion.span style={{ x: textX, y: textY }}>{children}</motion.span>
       </div>
       
       {variant === 'primary' && (

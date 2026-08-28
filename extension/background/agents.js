@@ -24,8 +24,8 @@ export class BaseAgent {
   // Common instructions for all agents
   getGlobalRules() {
     return (
-      "CRITICAL: Keep 'reasoning' concise (1-2 sentences). " +
-      "NEVER answer in markdown formatting (no bold, italics, or code blocks) unless explicitly stated by the question.\n\n"
+      "Use the 'reasoning' field as a scratchpad: think step-by-step, eliminate wrong options, and verify your logic before committing to the final answer. Give it as much space as the question needs. Keep 'reasoning' plain text (no markdown). " +
+      "Format the final 'answer' exactly as this task's rules below require — nothing more, nothing less.\n\n"
     );
   }
 
@@ -61,8 +61,8 @@ export class LogicAgent extends BaseAgent {
       "You are the Logic Agent. Your skill is deductive reasoning and process of elimination.\n" +
       "Rules:\n" +
       "1. MULTIPLE_CHOICE: Single-choice question. Select exactly one option_id and place it in the 'chosen' list.\n" +
-      "2. CHECKBOX: Multi-choice question. Select one or more option_ids and place them in the 'chosen' list.\n" +
-      "3. MULTIPLE_FILLABLE_BLANKS: Provide a dict of blank_id to option_id in the 'answer' field.\n\n" +
+      "2. CHECKBOX: Multi-choice question. Select one or more option_ids and place them in the 'chosen' list. Use the 'reasoning' field to evaluate each option individually based on the question constraints.\n" +
+      "3. MULTIPLE_FILLABLE_BLANKS: Provide a dict of blank_id to option_id in the 'answer' field. Use the 'reasoning' field to deduce the correct fit for each blank contextually.\n\n" +
       "IMPORTANT for CHECKBOX:\n" +
       "If a question has 'previous_attempts', each entry records a prior submission of chosen option_ids:\n" +
       "- 'response' is a list of option_ids that were chosen together.\n" +
@@ -76,11 +76,12 @@ export class LogicAgent extends BaseAgent {
       chosen = [chosen];
     }
 
+    const qOpts = domainQuestions?.[qId]?.Options || [];
+
     if (ansType === "MULTIPLE_CHOICE" && Array.isArray(chosen) && chosen.length > 0) {
       let optId = chosen[0];
-      let opts = domainQuestions[qId].Options || [];
-      if (!opts.find(o => o.option_id === optId)) {
-        let matched = opts.find(o => o.value.toLowerCase().includes(optId.toLowerCase()));
+      if (!qOpts.find(o => o.option_id === optId)) {
+        let matched = qOpts.find(o => o.value && typeof o.value === 'string' && o.value.toLowerCase().includes(String(optId).toLowerCase()));
         if (matched) {
           chosen = [matched.option_id];
         }
@@ -90,7 +91,7 @@ export class LogicAgent extends BaseAgent {
     if (["MULTIPLE_CHOICE", "CHECKBOX", "CHECKBOX_REFLECT"].includes(ansType) && Array.isArray(chosen)) {
       let mappedChosen = [];
       for (let c of chosen) {
-        let optObj = domainQuestions[qId].Options.find(o => o.option_id === c);
+        let optObj = qOpts.find(o => o.option_id === c);
         if (optObj && optObj.original_id) {
           mappedChosen.push(optObj.original_id);
         } else {
@@ -138,8 +139,9 @@ export class CodeExpressionAgent extends BaseAgent {
       "CODE_EXPRESSION",
       "You are the Code Agent. Your skill is writing flawless, raw code snippets.\n" +
       "Rules:\n" +
-      "1. CODE_EXPRESSION: Provide the exact code snippet required in the 'answer' field. You MUST wrap the code in markdown ``` backticks (e.g. ```python\\n...\\n```). CRITICAL: Preserve all newlines (\\n) and indentation.\n" +
-      "2. Automatically assume a Python context by default unless specified otherwise. Import necessary standard libraries implicitly required."
+      "1. CODE_EXPRESSION: Put ONLY the raw code in the 'answer' field. No markdown fences, no ``` backticks, no prose — just code. Preserve newlines and indentation as real characters in the JSON string.\n" +
+      "2. Assume Python unless the question says otherwise. Include any imports the code needs.\n" +
+      "3. Use the 'reasoning' field to plan the logic, edge cases, and complexity before writing the code."
     );
   }
 
@@ -180,7 +182,8 @@ export class RegexAgent extends BaseAgent {
       "REGEX",
       "You are the Regex Agent. Your skill is writing flawless regular expressions.\n" +
       "Rules:\n" +
-      "1. REGEX: Answer with the exact matching regular expression text ONLY, no wrapping quotes or slashes, in the 'answer' field."
+      "1. REGEX: Answer with the exact matching regular expression text ONLY, no wrapping quotes or slashes, in the 'answer' field.\n" +
+      "2. Use the 'reasoning' field to construct the regex step-by-step, explaining how it matches the required patterns and avoids false positives."
     );
   }
 
@@ -223,7 +226,8 @@ export class MathAgent extends BaseAgent {
       "Rules:\n" +
       "1. NUMERIC: Answer with the exact number ONLY, no quotes (e.g., 42), in the 'answer' field.\n" +
       "2. MATH: Provide the exact math expression required in the 'answer' field.\n" +
-      "3. If complex computation is implied, utilize your knowledge of libraries like numpy, scipy, sympy, or math to derive the correct numerical answer."
+      "3. If complex computation is implied, utilize your knowledge of libraries like numpy, scipy, sympy, or math to derive the correct numerical answer.\n" +
+      "4. Use the 'reasoning' field to show your mathematical work step-by-step, including formulas, intermediate calculations, and final derivation."
     );
   }
 

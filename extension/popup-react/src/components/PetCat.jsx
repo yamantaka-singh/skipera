@@ -13,12 +13,8 @@ const LAZY_PHRASES = [
   "100% on the quiz? You're welcome."
 ];
 
-// Oneko sprite offsets (32x32 grid — verified against actual sprite sheet)
-// NOTE: This sprite sheet has E/W and diagonals mirrored vs the standard reference.
-// col=3 (bg-pos -96px) = cat running LEFT = runW
-// col=4 (bg-pos -128px) = cat running RIGHT = runE
-// col=0 (bg-pos 0px) = NW diagonal (not NE)
-// col=1 (bg-pos -32px) = NE diagonal (not NW)
+// Oneko sprite sheet offsets (32x32 grid)
+// Correct orientation mapping so the cat faces forward towards motion
 const SPRITE_STATES = {
   idle: [[-3, -3]],
   alert: [[-7, -3]],
@@ -29,14 +25,14 @@ const SPRITE_STATES = {
   scratchWallW: [[-4, 0], [-4, -1]],
   tired: [[-3, -2]],
   sleep: [[-2, 0], [-2, -1]],
-  runN:  [[-1, -2], [-1, -3]],
-  runNE: [[-1, 0],  [-1, -1]],   // was NW in reference — actual NE in this sheet
-  runE:  [[-4, -2], [-4, -3]],   // was W in reference  — actual E  in this sheet
-  runSE: [[-5, -3], [-6, -1]],   // was SW in reference — actual SE in this sheet
-  runS:  [[-6, -3], [-7, -2]],
-  runSW: [[-5, -1], [-5, -2]],   // was SE in reference — actual SW in this sheet
-  runW:  [[-3, 0],  [-3, -1]],   // was E  in reference — actual W  in this sheet
-  runNW: [[0, -2],  [0, -3]],    // was NE in reference — actual NW in this sheet
+  runN:  [[-1, -2], [-1, -3]],  // Facing UP
+  runNE: [[0, -2],  [0, -3]],   // Facing UP-RIGHT
+  runE:  [[-3, 0],  [-3, -1]],  // Facing RIGHT
+  runSE: [[-5, -1], [-5, -2]],  // Facing DOWN-RIGHT
+  runS:  [[-6, -3], [-7, -2]],  // Facing DOWN
+  runSW: [[-5, -3], [-6, -1]],  // Facing DOWN-LEFT
+  runW:  [[-4, -2], [-4, -3]],  // Facing LEFT
+  runNW: [[-1, 0],  [-1, -1]],  // Facing UP-LEFT
 };
 
 export default function PetCat() {
@@ -45,17 +41,16 @@ export default function PetCat() {
   const [dialogue, setDialogue] = useState(null);
   const [hearts, setHearts] = useState([]);
 
-  // Constants
-  const CAT_SIZE = 32;
+  // Constants - Reduced speed for a calm, natural walking pace
   const CAT_RADIUS = 16;
-  const WANDER_FORCE = 0.00003;
-  const CHASE_FORCE = 0.000075;
-  const MAX_SPEED = 1.1;
+  const WANDER_FORCE = 0.000012;
+  const CHASE_FORCE = 0.000028;
+  const MAX_SPEED = 0.65;
 
   // Matter.js references
   const engineRef = useRef(null);
   const catBodyRef = useRef(null);
-  const obstaclesRef = useRef([]);
+  const boundariesRef = useRef([]);
 
   // Mouse tracking
   const mousePos = useRef({ x: 200, y: 200, lastMove: 0, isActive: false });
@@ -84,55 +79,39 @@ export default function PetCat() {
     engineRef.current = engine;
 
     // Create the cat rigid body
-    const cat = Matter.Bodies.circle(120, 120, CAT_RADIUS, {
+    const cat = Matter.Bodies.circle(100, 100, CAT_RADIUS, {
       frictionAir: 0.08,
-      restitution: 0.4,
+      friction: 0.0,
+      restitution: 0.2,
       mass: 1
     });
     catBodyRef.current = cat;
     Matter.World.add(engine.world, cat);
 
-    // 2. Map DOM Obstacles to Static Bodies
-    const mapObstacles = () => {
-      if (obstaclesRef.current.length > 0) {
-        Matter.World.remove(engine.world, obstaclesRef.current);
+    // 2. Setup Viewport Boundary Walls only (allows cat to walk on top of all UI elements)
+    const mapBoundaries = () => {
+      if (boundariesRef.current.length > 0) {
+        Matter.World.remove(engine.world, boundariesRef.current);
       }
       
-      const elements = document.querySelectorAll('.card, button, textarea, select');
-      const newObstacles = [];
+      const thickness = 60;
+      const w = window.innerWidth || 800;
+      const h = window.innerHeight || 600;
       
-      elements.forEach(el => {
-        const rect = el.getBoundingClientRect();
-        if (rect.width === 0 || rect.height === 0) return;
-        
-        const centerX = rect.left + rect.width / 2;
-        const centerY = rect.top + rect.height / 2;
-        
-        const body = Matter.Bodies.rectangle(centerX, centerY, rect.width * 0.9, rect.height * 0.9, {
-          isStatic: true,
-          restitution: 0.1
-        });
-        newObstacles.push(body);
-      });
-      
-      // Add boundaries
-      const thickness = 50;
-      const w = window.innerWidth;
-      const h = window.innerHeight;
-      
-      newObstacles.push(
+      const newBoundaries = [
         Matter.Bodies.rectangle(w / 2, -thickness / 2, w, thickness, { isStatic: true }),
         Matter.Bodies.rectangle(w / 2, h + thickness / 2, w, thickness, { isStatic: true }),
         Matter.Bodies.rectangle(-thickness / 2, h / 2, thickness, h, { isStatic: true }),
         Matter.Bodies.rectangle(w + thickness / 2, h / 2, thickness, h, { isStatic: true })
-      );
+      ];
 
-      Matter.World.add(engine.world, newObstacles);
-      obstaclesRef.current = newObstacles;
+      Matter.World.add(engine.world, newBoundaries);
+      boundariesRef.current = newBoundaries;
     };
 
-    mapObstacles();
-    window.addEventListener('resize', mapObstacles);
+    mapBoundaries();
+    const resizeHandler = () => mapBoundaries();
+    window.addEventListener('resize', resizeHandler);
 
     // 3. Render and Physics Loop
     let animationFrameId;
@@ -141,10 +120,10 @@ export default function PetCat() {
     let frameIndex = 0;
 
     const gameLoop = (time) => {
-      const dt = Math.min(time - lastTime, 16.667); // Delta cap avoids Matter.js warnings
+      const dt = Math.min(time - lastTime, 1000 / 60);
       lastTime = time;
 
-      // Update Matter Physics Engine with capped delta
+      // Update Matter Physics Engine
       Matter.Engine.update(engine, dt);
 
       const dx = mousePos.current.x - cat.position.x;
@@ -155,35 +134,14 @@ export default function PetCat() {
       // State Machine & Steering
       if (dialogue) {
         state.current = 'alert';
-      } else if (isMouseRecent && distToMouse > 35) {
-        // Chase mouse with potential-field obstacle avoidance
+      } else if (isMouseRecent && distToMouse > 28) {
+        // Gently follow mouse
         state.current = 'chase';
         const angle = Math.atan2(dy, dx);
-        let forceX = Math.cos(angle) * CHASE_FORCE;
-        let forceY = Math.sin(angle) * CHASE_FORCE;
-
-        // Repulsion from nearby static obstacle bodies
-        // ponytail: naive potential field, no guarantees in tight concave pockets
-        const REPEL_RADIUS = 48;
-        const REPEL_STRENGTH = CHASE_FORCE * 3.5;
-        for (const obs of obstaclesRef.current) {
-          if (!obs.isStatic) continue;
-          // Closest point on AABB to cat
-          const b = obs.bounds;
-          const cx = Math.max(b.min.x, Math.min(cat.position.x, b.max.x));
-          const cy = Math.max(b.min.y, Math.min(cat.position.y, b.max.y));
-          const ex = cat.position.x - cx;
-          const ey = cat.position.y - cy;
-          const dist = Math.sqrt(ex * ex + ey * ey) || 0.1;
-          if (dist < REPEL_RADIUS) {
-            const strength = REPEL_STRENGTH * (1 - dist / REPEL_RADIUS);
-            forceX += (ex / dist) * strength;
-            forceY += (ey / dist) * strength;
-          }
-        }
-
+        const forceX = Math.cos(angle) * CHASE_FORCE;
+        const forceY = Math.sin(angle) * CHASE_FORCE;
         Matter.Body.applyForce(cat, cat.position, { x: forceX, y: forceY });
-      } else if (isMouseRecent && distToMouse <= 35) {
+      } else if (isMouseRecent && distToMouse <= 28) {
         // Arrived at mouse -> sit & scratch
         state.current = 'scratch';
         Matter.Body.setVelocity(cat, Matter.Vector.mult(cat.velocity, 0.7));
@@ -217,31 +175,26 @@ export default function PetCat() {
         }
       }
 
-      // Cap speed
+      // Cap speed to a relaxed walk
       const speed = Matter.Vector.magnitude(cat.velocity);
       if (speed > MAX_SPEED) {
         Matter.Body.setVelocity(cat, Matter.Vector.mult(Matter.Vector.normalise(cat.velocity), MAX_SPEED));
       }
 
-      // Z-Depth Scaling Logic
-      const depthRatio = Math.max(0, Math.min(1, cat.position.y / window.innerHeight));
-      const scale = 0.85 + depthRatio * 0.4;
-      
-      // Update DOM visually
+      // Update DOM visually (on top of elements)
       if (containerRef.current) {
-        containerRef.current.style.transform = `translate3d(${cat.position.x - CAT_RADIUS}px, ${cat.position.y - CAT_RADIUS}px, 0) scale(${scale})`;
-        containerRef.current.style.zIndex = Math.floor(depthRatio * 100) + 15;
+        containerRef.current.style.transform = `translate3d(${cat.position.x - CAT_RADIUS}px, ${cat.position.y - CAT_RADIUS}px, 0)`;
         
         if (state.current === 'sleep') {
-          containerRef.current.style.opacity = '0.5';
+          containerRef.current.style.opacity = '0.6';
         } else {
           containerRef.current.style.opacity = '1';
         }
       }
 
-      // Sprite Animation (5 FPS)
+      // Sprite Animation (paced for relaxed movement)
       spriteTimer += dt;
-      if (spriteTimer > 180) {
+      if (spriteTimer > 220) {
         spriteTimer = 0;
         frameIndex++;
         
@@ -258,7 +211,9 @@ export default function PetCat() {
             moveAngle = Math.atan2(dy, dx);
           }
 
-          if (speed > 0.05 || (state.current === 'chase' && distToMouse > 25)) {
+          if (speed > 0.04 || (state.current === 'chase' && distToMouse > 20)) {
+            // Convert angle [-PI, PI] to 8 octants:
+            // 0 = East (Right), 1 = South-East, 2 = South, 3 = South-West, 4 = West (Left), 5 = North-West, 6 = North, 7 = North-East
             const octant = Math.round(8 * moveAngle / (2 * Math.PI) + 8) % 8;
             const dirs = ['runE', 'runSE', 'runS', 'runSW', 'runW', 'runNW', 'runN', 'runNE'];
             visualState = dirs[octant];
@@ -282,7 +237,7 @@ export default function PetCat() {
 
     return () => {
       cancelAnimationFrame(animationFrameId);
-      window.removeEventListener('resize', mapObstacles);
+      window.removeEventListener('resize', resizeHandler);
       window.removeEventListener('pointermove', handleMouseMove);
       Matter.Engine.clear(engine);
     };
@@ -297,8 +252,8 @@ export default function PetCat() {
     }, 1200);
 
     if (catBodyRef.current) {
-      const forceX = (Math.random() > 0.5 ? 1 : -1) * 0.004;
-      const forceY = (Math.random() > 0.5 ? 1 : -1) * 0.004;
+      const forceX = (Math.random() > 0.5 ? 1 : -1) * 0.002;
+      const forceY = (Math.random() > 0.5 ? 1 : -1) * 0.002;
       Matter.Body.applyForce(catBodyRef.current, catBodyRef.current.position, { x: forceX, y: forceY });
     }
     
@@ -315,7 +270,7 @@ export default function PetCat() {
   return (
     <div
       ref={containerRef}
-      className="fixed top-0 left-0 flex flex-col items-center justify-center cursor-pointer pointer-events-auto origin-bottom"
+      className="fixed top-0 left-0 flex flex-col items-center justify-center pointer-events-none z-50 origin-bottom"
       style={{ willChange: 'transform' }}
     >
       {/* Floating Hearts/Purr particles */}
@@ -363,7 +318,7 @@ export default function PetCat() {
           filter: 'drop-shadow(0 0 8px var(--color-primary)) drop-shadow(0 0 2px var(--color-primary))',
           transition: 'filter 0.5s ease',
         }}
-        className="active:scale-90 hover:scale-125 transition-transform"
+        className="pointer-events-auto cursor-pointer active:scale-90 hover:scale-125 transition-transform"
       />
     </div>
   );

@@ -12,7 +12,7 @@ from .session_utils import get_csrf_headers
 
 
 class Skipera(object):
-    def __init__(self, course: str, llm: bool):
+    def __init__(self, course: str, llm: bool, skip_practice: bool = False, graded_only: bool = False):
         self.user_id = None
         self.course_id = None
         self.base_url = BASE_URL
@@ -21,7 +21,11 @@ class Skipera(object):
         self.session.cookies.update(COOKIES)
         self.course = course
         self.llm = llm
+        self.skip_practice = skip_practice or getattr(config, "SKIP_PRACTICE", False)
+        self.graded_only = graded_only or getattr(config, "GRADED_ONLY", False)
         self.failed_items = set()
+        self.skipped_items = set()
+        self._graded_item_ids = None
         if not self.get_userid():
             self.refresh_cookies()
             if not self.get_userid():
@@ -53,15 +57,102 @@ class Skipera(object):
             return False
         return True
 
+    def get_graded_item_ids(self, materials_data: dict) -> set[str]:
+        graded_ids = set()
+        linked = materials_data.get("linked", {})
+
+        # 1. passableItemGroupChoices (primary source of graded items)
+        choices = linked.get("onDemandCourseMaterialPassableItemGroupChoices.v1", [])
+        choice_list = choices if isinstance(choices, list) else list(choices.values()) if isinstance(choices, dict) else []
+        for choice in choice_list:
+            if isinstance(choice, dict):
+                for item_id in choice.get("itemIds", []):
+                    graded_ids.add(item_id)
+
+        # 2. gradedAssignmentGroups in onDemandGradingParameters
+        params = linked.get("onDemandGradingParameters.v1", [])
+        param_list = params if isinstance(params, list) else list(params.values()) if isinstance(params, dict) else []
+        for param in param_list:
+            if isinstance(param, dict):
+                raw_groups = param.get("gradedAssignmentGroups", [])
+                group_list = raw_groups if isinstance(raw_groups, list) else list(raw_groups.values()) if isinstance(raw_groups, dict) else []
+                for group in group_list:
+                    if isinstance(group, dict):
+                        for item_id in group.get("itemIds", []):
+                            graded_ids.add(item_id)
+
+        # 3. passableLessonElements
+        elements = linked.get("onDemandCourseMaterialPassableLessonElements.v1", [])
+        element_list = elements if isinstance(elements, list) else list(elements.values()) if isinstance(elements, dict) else []
+        for elem in element_list:
+            if isinstance(elem, dict):
+                elem_id = elem.get("id", "")
+                item_id = elem_id.split("~")[-1] if "~" in elem_id else elem_id
+                if elem.get("gradingWeight", 0) > 0 or elem.get("isRequiredForPassing", False):
+                    graded_ids.add(item_id)
+
+        # 4. Item-level flags and explicit graded types
+        for item in linked.get("onDemandCourseMaterialItems.v2", []):
+            item_id = item.get("id")
+            content_summary = item.get("contentSummary", {})
+            type_name = content_summary.get("typeName", "")
+            if content_summary.get("isGraded") is True or item.get("isGraded") is True:
+                graded_ids.add(item_id)
+            elif type_name in {"gradedAssignment", "exam", "staffGraded", "phasedPeer", "gradedPeer", "gradedProgramming", "closedAssessment"}:
+                graded_ids.add(item_id)
+
+        return graded_ids
+
+    def is_graded_item(self, item: dict, materials_data: dict = None) -> bool:
+        item_id = item.get("id")
+        if self._graded_item_ids is None and materials_data:
+            self._graded_item_ids = self.get_graded_item_ids(materials_data)
+
+        if self._graded_item_ids and item_id in self._graded_item_ids:
+            return True
+
+        content_summary = item.get("contentSummary", {})
+        type_name = content_summary.get("typeName", "")
+        if content_summary.get("isGraded") is True or item.get("isGraded") is True:
+            return True
+
+        if type_name in {"gradedAssignment", "exam", "staffGraded", "phasedPeer", "gradedPeer", "gradedProgramming", "closedAssessment"}:
+            return True
+
+        name = (item.get("name") or "").lower()
+        if ("graded" in name or "exam" in name or "final" in name) and not name.startswith("practice"):
+            return True
+
+        return False
+
+    def is_practice_item(self, item: dict, materials_data: dict = None) -> bool:
+        name = (item.get("name") or "").lower().strip()
+        type_name = item.get("contentSummary", {}).get("typeName", "")
+
+        if name.startswith("practice") or "practice quiz" in name or "practice assignment" in name:
+            return True
+
+        if type_name in {"ungradedWidget", "ungradedLti", "coach", "ungradedAssignment"}:
+            if not self.is_graded_item(item, materials_data):
+                return True
+
+        return False
+
     def get_course(self) -> None:
         r = self.get_course_materials()
         self.course_id = r["elements"][0]["id"]
         all_items = r["linked"]["onDemandCourseMaterialItems.v2"]
+        self._graded_item_ids = self.get_graded_item_ids(r)
 
         logger.info("Course ID: " + self.course_id)
         logger.info("Number of Modules: " +
                     str(len(r["linked"]["onDemandCourseMaterialModules.v1"])))
         logger.info("Total items: " + str(len(all_items)))
+
+        if self.graded_only:
+            logger.info(f"Graded-only mode active: Found {len(self._graded_item_ids)} graded items in course.")
+        elif self.skip_practice:
+            logger.info("Skip-practice mode active: Practice quizzes and ungraded items will be skipped.")
 
         self.process_items(all_items)
 
@@ -98,9 +189,11 @@ class Skipera(object):
 
             try:
                 fresh_data = self.get_course_materials()
+                self._graded_item_ids = self.get_graded_item_ids(fresh_data)
                 current_items = fresh_data["linked"]["onDemandCourseMaterialItems.v2"]
             except SystemExit:
                 current_items = all_items
+                fresh_data = None
 
             pending_items = [item for item in current_items if item["id"] not in completed]
             if not pending_items:
@@ -109,7 +202,7 @@ class Skipera(object):
 
             unlocked_items = [
                 item for item in pending_items 
-                if not item.get("isLocked", False) and item["id"] not in self.failed_items
+                if not item.get("isLocked", False) and item["id"] not in self.failed_items and item["id"] not in self.skipped_items
             ]
             if not unlocked_items:
                 logger.info(
@@ -117,10 +210,30 @@ class Skipera(object):
                 )
                 break
 
+            # Filter items based on graded_only or skip_practice
+            items_to_process = []
+            for item in unlocked_items:
+                if self.graded_only and not self.is_graded_item(item, fresh_data):
+                    logger.info(f"Skipping non-graded item: {item['name']}")
+                    self.skipped_items.add(item["id"])
+                elif self.skip_practice and self.is_practice_item(item, fresh_data):
+                    logger.info(f"Skipping practice item: {item['name']}")
+                    self.skipped_items.add(item["id"])
+                else:
+                    items_to_process.append(item)
+
+            if not items_to_process:
+                continue
+
             concurrent_items = []
             sequential_items = []
-            for item in unlocked_items:
-                if item["contentSummary"]["typeName"] not in {"discussionPrompt", "ungradedAssignment", "staffGraded", "phasedPeer"}:
+            quiz_and_interactive = {
+                "discussionPrompt", "ungradedAssignment", "staffGraded", "phasedPeer",
+                "gradedAssignment", "exam", "quiz", "gradedPeer", "programming",
+                "gradedProgramming", "closedAssessment"
+            }
+            for item in items_to_process:
+                if item["contentSummary"]["typeName"] not in quiz_and_interactive:
                     concurrent_items.append(item)
                 else:
                     sequential_items.append(item)
@@ -160,24 +273,44 @@ class Skipera(object):
         logger.info(
             f"[module:{module_id}] [item:{item_id}] Processing {item['name']}")
 
+        quiz_types = {
+            "ungradedAssignment", "staffGraded", "gradedAssignment", "exam", "quiz",
+            "phasedPeer", "gradedPeer", "programming", "gradedProgramming", "closedAssessment"
+        }
+
         success = False
         if item_type == "lecture":
             success = self.watch_item(item, self.get_video_metadata(item_id))
         elif item_type == "supplement":
             success = self.read_item(item_id)
-        elif item_type in {"ungradedAssignment", "staffGraded"} and self.llm:
+        elif item_type in quiz_types and self.llm:
+            if (self.skip_practice or self.graded_only) and self.is_practice_item(item):
+                logger.info(f"[module:{module_id}] [item:{item_id}] Skipping practice quiz {item['name']}")
+                return True
             success = GradedSolver(
                 self.session, self.course_id, item_id, course_name=self.course, item_name=item.get("name", "")
             ).solve()
         elif item_type == "discussionPrompt" and self.llm:
+            if (self.skip_practice or self.graded_only) and self.is_practice_item(item):
+                logger.info(f"[module:{module_id}] [item:{item_id}] Skipping practice discussion {item['name']}")
+                return True
             success = DiscussionPromptSolver(
                 self.session, self.user_id, self.course_id, item_id).solve()
         elif item_type == "coach":
+            if (self.skip_practice or self.graded_only) and self.is_practice_item(item):
+                logger.info(f"[module:{module_id}] [item:{item_id}] Skipping practice coach {item['name']}")
+                return True
             success = CoachSolver(
                 self.session, self.user_id, self.course_id, item_id).solve()
         elif item_type == "ungradedWidget":
+            if self.graded_only or self.skip_practice:
+                logger.info(f"[module:{module_id}] [item:{item_id}] Skipping practice widget {item['name']}")
+                return True
             success = self.ungraded_widget_item(item_id)
         elif item_type == "ungradedLti":
+            if self.graded_only or self.skip_practice:
+                logger.info(f"[module:{module_id}] [item:{item_id}] Skipping practice LTI {item['name']}")
+                return True
             success = self.ungraded_lti_item(item_id)
         else:
             logger.warning(
@@ -277,8 +410,10 @@ class Skipera(object):
 @click.command()
 @click.argument('slug')
 @click.option('--llm', is_flag=True, help="Whether to use an LLM to solve graded assignments.")
-def main(slug: str, llm: bool) -> None:
-    skipera = Skipera(slug, llm)
+@click.option('--skip-practice', is_flag=True, default=False, help="Skip practice quizzes/assignments and only solve graded items.")
+@click.option('--graded-only', '-g', is_flag=True, default=False, help="Only solve graded assignments, skipping all practice and non-graded items.")
+def main(slug: str, llm: bool, skip_practice: bool, graded_only: bool) -> None:
+    skipera = Skipera(slug, llm, skip_practice=skip_practice, graded_only=graded_only)
     skipera.get_course()
 
 if __name__ == '__main__':

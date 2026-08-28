@@ -68,6 +68,19 @@ Where `course-slug` is from the Coursera URL. For example, if the URL is `https:
 skipera introduction-psychology
 ```
 
+### Graded-Only and Skip-Practice Options
+
+- **Skip Practice Assessments:** Skip practice quizzes and formative exercises, only solving graded assessments:
+  ```bash
+  skipera introduction-psychology --llm --skip-practice
+  ```
+- **Graded-Only Mode:** Skip videos, readings, and practice items completely to only solve graded assessments:
+  ```bash
+  skipera introduction-psychology --llm --graded-only
+  # or short flag:
+  skipera introduction-psychology --llm -g
+  ```
+
 ## Browser Extension
 
 Skipera also includes a browser extension:
@@ -75,7 +88,7 @@ Skipera also includes a browser extension:
 1. Open `chrome://extensions/` in Chrome or Edge.
 2. Enable **Developer mode** (toggle in top-right).
 3. Click **Load unpacked** and select the `extension/` folder.
-4. Open the extension popup on any Coursera course page to skip materials or solve quizzes.
+4. Open the extension popup on any Coursera course page to fast-forward materials, solve graded assessments only, or auto-solve the entire course.
 
 ## LLM Support
 

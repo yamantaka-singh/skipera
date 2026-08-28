@@ -1,5 +1,5 @@
 // quizSolver.js
-import { fetchCoursera, delay } from './courseraApi.js';
+import { fetchCoursera, delay, getModuleContext } from './courseraApi.js';
 import { GET_STATE_QUERY, INITIATE_ATTEMPT_QUERY, SAVE_RESPONSES_QUERY, SUBMIT_DRAFT_QUERY, ASSIGNMENT_FEEDBACK_QUERY } from './queries.js';
 import { callLLMProvider } from './llmProviders.js';
 import { getAgentForType, getReflectionPrompt, stripHtmlTags } from './agents.js';
@@ -33,17 +33,19 @@ async function fetchGraphQL(opname, query, variables) {
 
 const TEXT_ANSWER_TYPES = new Set(["TEXT_REFLECT", "NUMERIC", "PLAIN_TEXT", "TEXT_EXACT_MATCH", "REGEX", "FILE_UPLOAD", "URL", "CODE_EXPRESSION", "MATH", "RICH_TEXT", "WIDGET"]);
 
-async function callLLM(unsolvedQuestions, settings, systemPrompt) {
-  const userPrompt = JSON.stringify(unsolvedQuestions, null, 2);
-  const keys = settings.apiKey.split(",").map(k => k.trim()).filter(k => k);
-  const provider = settings.provider || "nvidia";
+async function callLLM(unsolvedQuestions, settings, systemPrompt, moduleContext = "") {
+  const userPrompt = moduleContext 
+    ? `Module Context (Use this to answer questions if relevant):\n${moduleContext}\n\nQuestions:\n${JSON.stringify(unsolvedQuestions, null, 2)}`
+    : JSON.stringify(unsolvedQuestions, null, 2);
+  const keys = (settings?.apiKey || "").split(",").map(k => k.trim()).filter(k => k);
+  const provider = settings?.provider || "nvidia";
   
-  return await callLLMProvider(provider, keys, settings.modelName, systemPrompt, userPrompt);
+  return await callLLMProvider(provider, keys, settings?.modelName, systemPrompt, userPrompt);
 }
 
 import { updateDashboard } from './dashboardStore.js';
 
-export async function triggerQuizSolver(courseId, itemId, settings, tabId, courseSlug = "default", runContext = null) {
+export async function triggerQuizSolver(courseId, itemId, settings, tabId, courseSlug = "default", runContext = null, materials = null) {
   const safeSlug = courseSlug || "default";
   const updateProgress = (msg, overrideType) => {
     let type = overrideType || "info";
@@ -155,7 +157,7 @@ export async function triggerQuizSolver(courseId, itemId, settings, tabId, cours
           const agent = getAgentForType(qTypeStr);
           answerResponses.push(agent.formatPayload(partId, qTypeStr, null, qd.correct_answer));
         } else {
-          unsolvedQuestions[partId] = { Question: prompt, Options: [], Type: qTypeStr };
+          unsolvedQuestions[partId] = { Question: qd.Question, Options: [], Type: qTypeStr };
           if (qd.wrong_attempts) unsolvedQuestions[partId].previous_attempts = qd.wrong_attempts;
         }
       } else if (qTypeStr === "MULTIPLE_CHOICE") {
@@ -171,7 +173,7 @@ export async function triggerQuizSolver(courseId, itemId, settings, tabId, cours
           answerResponses.push(agent.formatPayload(partId, qTypeStr, [filtered[0].option_id]));
           continue;
         }
-        unsolvedQuestions[partId] = { Question: prompt, Options: filtered, Type: qTypeStr };
+        unsolvedQuestions[partId] = { Question: qd.Question, Options: filtered, Type: qTypeStr };
       } else if (qTypeStr === "CHECKBOX" || qTypeStr === "CHECKBOX_REFLECT") {
         const allResolved = options.every(o => o.correct !== null);
         if (allResolved) {
@@ -181,12 +183,14 @@ export async function triggerQuizSolver(courseId, itemId, settings, tabId, cours
           continue;
         }
         const filtered = options.filter(o => o.correct !== false);
-        unsolvedQuestions[partId] = { Question: prompt, Options: filtered, Type: qTypeStr };
+        unsolvedQuestions[partId] = { Question: qd.Question, Options: filtered, Type: qTypeStr };
       }
     }
 
     if (Object.keys(unsolvedQuestions).length > 0) {
       updateProgress("Calling LLM for unsolved questions...");
+      
+      const moduleContext = materials ? await getModuleContext(courseId, itemId, materials) : "";
       
       let domainGroups = {};
       for (const [qid, q] of Object.entries(unsolvedQuestions)) {
@@ -198,25 +202,83 @@ export async function triggerQuizSolver(courseId, itemId, settings, tabId, cours
         domainGroups[domain].questions[qid] = q;
       }
 
-      for (const [domain, groupData] of Object.entries(domainGroups)) {
+function resolveQuestionId(ansQId, domainQuestions, responseIndex) {
+  if (!domainQuestions || typeof domainQuestions !== "object") return null;
+  const questionKeys = Object.keys(domainQuestions);
+  if (questionKeys.length === 0) return null;
+
+  // 1. Direct key match
+  if (ansQId && domainQuestions[ansQId]) {
+    return ansQId;
+  }
+
+  // 2. Case-insensitive & trimmed match
+  if (ansQId) {
+    const cleanId = String(ansQId).trim().toLowerCase();
+    const caseMatch = questionKeys.find(k => k.trim().toLowerCase() === cleanId);
+    if (caseMatch) return caseMatch;
+
+    // 3. Match against "q1", "q2", "question_1", "part_1", numbers
+    const numMatch = cleanId.match(/\d+/);
+    if (numMatch) {
+      const idx = parseInt(numMatch[0], 10);
+      if (idx >= 1 && idx <= questionKeys.length) {
+        return questionKeys[idx - 1];
+      }
+      if (idx >= 0 && idx < questionKeys.length) {
+        return questionKeys[idx];
+      }
+    }
+  }
+
+  // 4. Fallback by position in responses array if valid
+  if (typeof responseIndex === "number" && responseIndex >= 0 && responseIndex < questionKeys.length) {
+    return questionKeys[responseIndex];
+  }
+
+  // 5. If only 1 question in this domain group, default to it
+  if (questionKeys.length === 1) {
+    return questionKeys[0];
+  }
+
+  return null;
+}
+
+      const domainPromises = Object.entries(domainGroups).map(async ([domain, groupData]) => {
         let domainQuestions = groupData.questions;
         let reflection = getReflectionPrompt(domainQuestions);
         let customPrompt = groupData.agent.buildPrompt(domainQuestions, reflection);
         
-        const llmResult = await callLLM(domainQuestions, settings, customPrompt);
+        const llmResult = await callLLM(domainQuestions, settings, customPrompt, moduleContext);
         
         if (!llmResult || !llmResult.responses || llmResult.responses.length === 0) {
           throw new Error(`LLM returned an empty or invalid response format for domain ${domain}.`);
         }
         
-        for (const ans of llmResult.responses) {
-          let ansType = domainQuestions[ans.question_id].Type;
+        const domainResponses = [];
+        for (let i = 0; i < llmResult.responses.length; i++) {
+          const ans = llmResult.responses[i];
+          const matchedQId = resolveQuestionId(ans.question_id, domainQuestions, i);
+          
+          if (!matchedQId || !domainQuestions[matchedQId]) {
+            console.warn(`[Skipera Solver] Could not resolve question id '${ans.question_id}' to domain questions:`, Object.keys(domainQuestions));
+            continue;
+          }
+          
+          const qObj = domainQuestions[matchedQId];
+          let ansType = qObj.Type;
           let agent = getAgentForType(ansType);
           
-          let { chosen, answer } = agent.postProcess(ansType, ans.chosen, ans.answer, domainQuestions, ans.question_id);
+          let { chosen, answer } = agent.postProcess(ansType, ans.chosen, ans.answer, domainQuestions, matchedQId);
           
-          answerResponses.push(agent.formatPayload(ans.question_id, ansType, chosen, answer));
+          domainResponses.push(agent.formatPayload(matchedQId, ansType, chosen, answer));
         }
+        return domainResponses;
+      });
+
+      const allDomainResults = await Promise.all(domainPromises);
+      for (const resList of allDomainResults) {
+        answerResponses.push(...resList);
       }
     } else {
       updateProgress("All questions answered via local cache.");

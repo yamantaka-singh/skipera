@@ -8,8 +8,9 @@ const BASE_URL = "https://www.coursera.org/api/";
  */
 export async function getCsrfToken() {
   return new Promise((resolve) => {
-    chrome.cookies.get({ url: "https://www.coursera.org", name: "csrf3-token" }, (cookie) => {
-      resolve(cookie ? cookie.value : null);
+    chrome.cookies.getAll({ domain: "coursera.org" }, (cookies) => {
+      const csrf = cookies.find(c => c.name.toLowerCase() === "csrf3-token");
+      resolve(csrf ? csrf.value : null);
     });
   });
 }
@@ -176,3 +177,147 @@ export async function completeLti(userId, courseId, itemId) {
 export async function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
+
+/**
+ * Determines whether a course item is a graded assignment/exam.
+ */
+export function isGradedItem(item, materials) {
+  if (!item) return false;
+  const itemId = item.id;
+  const linked = materials?.linked || {};
+
+  // 1. passableItemGroupChoices (primary indicator of graded items)
+  const choices = linked["onDemandCourseMaterialPassableItemGroupChoices.v1"];
+  if (choices) {
+    const choiceList = Array.isArray(choices) ? choices : Object.values(choices);
+    for (const choice of choiceList) {
+      if (choice?.itemIds && Array.isArray(choice.itemIds) && choice.itemIds.includes(itemId)) {
+        return true;
+      }
+    }
+  }
+
+  // 2. gradedAssignmentGroups
+  const params = linked["onDemandGradingParameters.v1"];
+  if (params) {
+    const paramList = Array.isArray(params) ? params : Object.values(params);
+    for (const param of paramList) {
+      const rawGroups = param?.gradedAssignmentGroups;
+      if (rawGroups) {
+        const groups = Array.isArray(rawGroups) ? rawGroups : (typeof rawGroups === "object" ? Object.values(rawGroups) : []);
+        for (const group of groups) {
+          if (group && typeof group === "object") {
+            const itemIds = group.itemIds;
+            if (Array.isArray(itemIds) && itemIds.includes(itemId)) {
+              return true;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // 3. passableLessonElements
+  const elements = linked["onDemandCourseMaterialPassableLessonElements.v1"];
+  if (elements) {
+    const elementList = Array.isArray(elements) ? elements : Object.values(elements);
+    for (const elem of elementList) {
+      const elemId = elem?.id || "";
+      const lastId = elemId.includes("~") ? elemId.split("~").pop() : elemId;
+      if (lastId === itemId && (elem?.gradingWeight > 0 || elem?.isRequiredForPassing)) {
+        return true;
+      }
+    }
+  }
+
+  // 4. Content summary & item flags
+  const cs = item.contentSummary || {};
+  if (cs.isGraded === true || item.isGraded === true) return true;
+
+  const type = cs.typeName || "";
+  if (["gradedAssignment", "exam", "staffGraded", "phasedPeer", "gradedPeer", "gradedProgramming", "closedAssessment"].includes(type)) {
+    return true;
+  }
+
+  const name = (item.name || "").toLowerCase();
+  if ((name.includes("graded") || name.includes("exam") || name.includes("final")) && !name.startsWith("practice")) {
+    return true;
+  }
+
+  return false;
+}
+
+/**
+ * Determines whether a course item is a practice/ungraded activity or formative quiz.
+ */
+export function isPracticeItem(item, materials) {
+  if (!item) return false;
+  const name = (item.name || "").toLowerCase().trim();
+  const type = item.contentSummary?.typeName || "";
+
+  if (name.startsWith("practice") || name.includes("practice quiz") || name.includes("practice assignment")) {
+    return true;
+  }
+
+  if (["ungradedWidget", "ungradedLti", "coach", "ungradedAssignment"].includes(type)) {
+    if (!isGradedItem(item, materials)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+/**
+ * Fetches lightweight context (readings) from the current module to inject into the LLM prompt.
+ */
+export async function getModuleContext(courseId, currentItemId, materials) {
+  try {
+    const items = materials?.linked?.["onDemandCourseMaterialItems.v2"] || [];
+    const modules = materials?.linked?.["onDemandCourseMaterialModules.v1"] || [];
+    const lessons = materials?.linked?.["onDemandCourseMaterialLessons.v1"] || [];
+
+    // Find which module contains this item
+    let itemsInModule = [];
+    for (const mod of modules) {
+      let moduleItems = [];
+      const modLessons = lessons.filter(l => (mod.lessonIds || []).includes(l.id));
+      for (const les of modLessons) {
+         moduleItems.push(...(les.elementIds || []));
+      }
+      moduleItems = moduleItems.map(id => id.includes("~") ? id.split("~")[1] : id);
+      if (moduleItems.includes(currentItemId)) {
+        itemsInModule = moduleItems;
+        break;
+      }
+    }
+
+    if (!itemsInModule.length) return "";
+
+    // Get up to 3 items before the current item
+    const currentIndex = itemsInModule.indexOf(currentItemId);
+    const prevIds = itemsInModule.slice(Math.max(0, currentIndex - 3), currentIndex);
+
+    const contextPromises = prevIds.map(async (prevId) => {
+      const itemObj = items.find(i => i.id === prevId);
+      if (!itemObj || itemObj.contentSummary?.typeName !== "supplement") return null;
+      try {
+        const res = await fetchCoursera(`onDemandSupplements.v1/${courseId}~${prevId}?includes=asset&fields=value`);
+        if (res.ok) {
+          const data = await res.json();
+          const textHtml = data.elements?.[0]?.value || "";
+          const cleanText = textHtml.replace(/<[^>]*>?/gm, ' ').replace(/\s+/g, ' ').trim();
+          if (cleanText) return `--- Reading: ${itemObj.name} ---\n${cleanText.substring(0, 1500)}`;
+        }
+      } catch (e) {}
+      return null;
+    });
+
+    const results = await Promise.all(contextPromises);
+    return results.filter(Boolean).join("\n\n");
+  } catch (err) {
+    console.error("Failed to fetch context", err);
+    return "";
+  }
+}
+

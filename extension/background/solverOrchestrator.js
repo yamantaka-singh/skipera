@@ -1,4 +1,4 @@
-import { getUserId, getCourseMaterials, getCompletedItems, skipLecture, readSupplement, completeWidget, completeLti, delay, fetchCoursera } from './courseraApi.js';
+import { getUserId, getCourseMaterials, getCompletedItems, skipLecture, readSupplement, completeWidget, completeLti, delay, fetchCoursera, isGradedItem, isPracticeItem } from './courseraApi.js';
 import { triggerQuizSolver } from './quizSolver.js';
 import { callLLMProvider } from './llmProviders.js';
 import { updateDashboard } from './dashboardStore.js';
@@ -35,16 +35,20 @@ async function runConcurrent(items, limit, fn) {
 async function processBatchableItem(item, userId, safeSlug, courseId, updateProgress) {
   const type = item.contentSummary?.typeName;
   if (type === "lecture") {
-    await skipLecture(userId, safeSlug, courseId, item);
+    const ok = await skipLecture(userId, safeSlug, courseId, item);
+    if (ok === false) throw new Error("Could not mark lecture as complete");
     updateProgress(`Completed lecture: ${item.name}`, "complete");
   } else if (type === "supplement") {
-    await readSupplement(userId, courseId, item.id);
+    const ok = await readSupplement(userId, courseId, item.id);
+    if (ok === false) throw new Error("Could not mark supplement as read");
     updateProgress(`Completed supplement: ${item.name}`, "complete");
   } else if (type === "widget" || type === "gradedWidget" || type === "ungradedWidget") {
-    await completeWidget(userId, courseId, item.id);
+    const ok = await completeWidget(userId, courseId, item.id);
+    if (ok === false) throw new Error("Could not complete widget");
     updateProgress(`Completed widget: ${item.name}`, "complete");
   } else if (type === "lti" || type === "gradedLti" || type === "ungradedLti") {
-    await completeLti(userId, courseId, item.id);
+    const ok = await completeLti(userId, courseId, item.id);
+    if (ok === false) throw new Error("Could not launch LTI item");
     updateProgress(`Completed LTI: ${item.name}`, "complete");
   }
 }
@@ -58,12 +62,11 @@ export async function runFullCourse(courseSlug, settings, tabId) {
 
   const provider = settings?.provider || "nvidia";
   const apiKeyStr = settings?.apiKey || "";
-  const keyList = apiKeyStr.split(",").map(k => k.trim()).filter(k => k);
+  const isAiSolver = !settings?.videosOnly && apiKeyStr.trim().length > 0;
   
-  const isAiSolver = !settings?.videosOnly && !!settings?.apiKey?.trim();
-  
-  // Concurrency Guard: NVIDIA NIM free tier permits max 3 concurrent tasks per API key
+  // NVIDIA NIM Concurrency Shield: Max 3 concurrent runs per API key across all open tabs
   if (provider === "nvidia" && isAiSolver) {
+    const keyList = apiKeyStr.split(",").map(k => k.trim()).filter(k => k);
     const maxAllowed = Math.max(1, keyList.length) * 3;
     let currentNvidiaRuns = 0;
     for (const [tId, run] of activeRuns.entries()) {
@@ -105,8 +108,12 @@ export async function runFullCourse(courseSlug, settings, tabId) {
     
     let loopCount = 0;
     const skippedItems = new Set();
+    const itemAttempts = new Map();
     const batchableTypes = new Set(["lecture", "supplement", "widget", "gradedWidget", "ungradedWidget", "lti", "gradedLti", "ungradedLti"]);
-    const quizTypes = new Set(["exam", "quiz", "assignment", "closedAssessment", "phasedPeer", "gradedPeer", "programming", "gradedProgramming", "staffGraded", "ungradedAssignment"]);
+    const quizTypes = new Set(["exam", "quiz", "assignment", "closedAssessment", "programming", "gradedProgramming", "staffGraded", "ungradedAssignment"]);
+    // Peer-review assignments use a phased submit/review/grade flow that the SubmissionState.queryState
+    // API rejects ("Unsupported Assignment Type ... phasedPeer"). Not auto-solvable — always skipped.
+    const peerTypes = new Set(["phasedPeer", "gradedPeer"]);
 
     while (loopCount < 100) {
       if (tabId && runContext.isCancelled) {
@@ -138,18 +145,45 @@ export async function runFullCourse(courseSlug, settings, tabId) {
         break;
       }
 
-      // If in videosOnly mode (or no API key), skip unsupported or AI items
-      if (settings?.videosOnly || !settings?.apiKey?.trim()) {
+      // Automatically skip items that have been attempted 2+ times without Coursera registering completion
+      for (const item of unlocked) {
+        const attempts = itemAttempts.get(item.id) || 0;
+        if (attempts >= 2) {
+          skippedItems.add(item.id);
+          updateProgress(`Skipping uncompletable item: ${item.name}`, "skip");
+        }
+      }
+
+      // 1. Graded-only mode: skip everything except graded items
+      if (settings?.gradedOnly) {
+        for (const item of unlocked) {
+          if (!isGradedItem(item, materials)) {
+            skippedItems.add(item.id);
+            updateProgress(`Skipping non-graded item: ${item.name}`, "skip");
+          }
+        }
+      }
+      // 2. Fast-forward mode (videos only / no API key): skip quiz/discussion/AI items
+      else if (settings?.videosOnly || !settings?.apiKey?.trim()) {
         for (const item of unlocked) {
           const type = item.contentSummary?.typeName;
-          if (quizTypes.has(type) || type === "discussionPrompt" || ["plugin", "notebook"].includes(type)) {
+          if (quizTypes.has(type) || peerTypes.has(type) || type === "discussionPrompt" || ["plugin", "notebook"].includes(type)) {
             skippedItems.add(item.id);
             updateProgress(`Skipping ${item.name} (${type}) in fast-forward mode`, "skip");
           }
         }
       }
+      // 3. Skip practice mode (default when solving quizzes): skip practice quizzes and ungraded activities
+      else if (settings?.skipPractice !== false) {
+        for (const item of unlocked) {
+          if (isPracticeItem(item, materials)) {
+            skippedItems.add(item.id);
+            updateProgress(`Skipping practice item: ${item.name}`, "skip");
+          }
+        }
+      }
 
-      const batchableItems = unlocked.filter(item => batchableTypes.has(item.contentSummary?.typeName));
+      const batchableItems = unlocked.filter(item => batchableTypes.has(item.contentSummary?.typeName) && !skippedItems.has(item.id));
       const sequentialItems = unlocked.filter(item => !batchableTypes.has(item.contentSummary?.typeName) && !skippedItems.has(item.id));
 
       if (batchableItems.length > 0) {
@@ -157,6 +191,7 @@ export async function runFullCourse(courseSlug, settings, tabId) {
         
         await runConcurrent(batchableItems, 10, async (item) => {
           if (tabId && runContext.isCancelled) return;
+          itemAttempts.set(item.id, (itemAttempts.get(item.id) || 0) + 1);
           try {
             await processBatchableItem(item, userId, safeSlug, courseId, updateProgress);
           } catch (e) {
@@ -165,6 +200,7 @@ export async function runFullCourse(courseSlug, settings, tabId) {
           }
         });
         
+        await delay(500);
         continue;
       }
 
@@ -173,15 +209,19 @@ export async function runFullCourse(courseSlug, settings, tabId) {
         if (tabId && runContext.isCancelled) break;
         const type = item.contentSummary?.typeName;
 
+        itemAttempts.set(item.id, (itemAttempts.get(item.id) || 0) + 1);
         updateProgress(`Processing item: ${item.name} (${type})`);
         try {
           if (quizTypes.has(type)) {
             updateProgress(`Triggering quiz solver for ${item.name}`);
-            await triggerQuizSolver(courseId, item.id, settings, tabId, safeSlug, runContext);
+            await triggerQuizSolver(courseId, item.id, settings, tabId, safeSlug, runContext, materials);
             updateProgress(`Completed quiz item: ${item.name}`, "complete");
           } else if (type === "discussionPrompt") {
             await solveDiscussion(courseId, item.id, settings, tabId);
             updateProgress(`Completed discussion: ${item.name}`, "complete");
+          } else if (peerTypes.has(type)) {
+            updateProgress(`Skipping peer review (complete manually): ${item.name}`, "skip");
+            skippedItems.add(item.id);
           } else {
             updateProgress(`Skipping unsupported item: ${item.name} (${type})`, "skip");
             skippedItems.add(item.id);
@@ -190,6 +230,7 @@ export async function runFullCourse(courseSlug, settings, tabId) {
           updateProgress(`Failed to process item ${item.name}: ${e.message}`, "error");
           skippedItems.add(item.id);
         }
+        await delay(500);
         continue;
       }
 
@@ -197,6 +238,7 @@ export async function runFullCourse(courseSlug, settings, tabId) {
     }
   } catch (err) {
     console.error(err);
+    updateDashboard(`Run failed: ${err.message}`, "error", safeSlug);
     if (tabId) activeRuns.delete(tabId);
     throw err;
   }
@@ -216,6 +258,8 @@ async function solveDiscussion(courseId, itemId, settings, tabId) {
   try {
     updateProgress("Fetching discussion prompt...");
     const userId = await getUserId();
+    if (!userId) throw new Error("Could not fetch User ID for discussion. Are you logged in?");
+    
     const url = `onDemandDiscussionPrompts.v1/${userId}~${courseId}~${itemId}?fields=onDemandDiscussionPromptQuestions.v1(content),promptType,question&includes=question`;
     
     const res = await fetchCoursera(url);

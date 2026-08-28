@@ -1,23 +1,36 @@
 function parseJsonText(text) {
+  if (!text) return { responses: [] };
   if (typeof text !== "string") return text;
-  const start = text.indexOf("{");
-  const end = text.lastIndexOf("}");
+  let cleaned = text.replace(/```json/gi, "").replace(/```/g, "").trim();
+  const start = cleaned.indexOf("{");
+  const end = cleaned.lastIndexOf("}");
   if (start !== -1 && end !== -1) {
-    text = text.slice(start, end + 1);
+    cleaned = cleaned.slice(start, end + 1);
   }
-  return JSON.parse(text);
+  try {
+    return JSON.parse(cleaned);
+  } catch (e) {
+    console.warn("[Skipera LLM] JSON parse failed, trying regex extraction:", text);
+    const match = text.match(/\{[\s\S]*"responses"[\s\S]*\}/);
+    if (match) {
+      try {
+        return JSON.parse(match[0]);
+      } catch (inner) {}
+    }
+    throw e;
+  }
 }
 
 const PROVIDER_CONFIGS = {
   nvidia: {
     endpoint: "https://integrate.api.nvidia.com/v1/chat/completions",
     formatHeaders: (key) => ({
-      "Authorization": `Bearer ${key}`,
+      "Authorization": `Bearer ${key.trim()}`,
       "Content-Type": "application/json",
       "Accept": "application/json"
     }),
     formatBody: (model, systemPrompt, userPrompt) => {
-      systemPrompt += "\n\nCRITICAL: You must respond with a valid JSON object matching this schema:\n" + JSON.stringify({
+      const fullSystem = `${systemPrompt}\n\nCRITICAL: You must respond with a valid JSON object matching this schema:\n${JSON.stringify({
         type: "object",
         properties: {
           responses: {
@@ -35,28 +48,30 @@ const PROVIDER_CONFIGS = {
           }
         },
         required: ["responses"]
-      });
+      })}`;
+
       return {
         model: model,
         messages: [
-          { role: "system", content: systemPrompt },
-          { role: "user", content: userPrompt }
+          { role: "user", content: `${fullSystem}\n\n${userPrompt}` }
         ],
         max_tokens: 8192,
-        temperature: 0.0,
+        temperature: 0.1,
         top_p: 1.0,
-        presence_penalty: 0.0,
-        frequency_penalty: 0.0,
-        chat_template_kwargs: { enable_thinking: false },
-        response_format: { type: "json_object" }
+        stream: false,
+        chat_template_kwargs: { enable_thinking: false }
       };
     },
-    parseResponse: (json) => parseJsonText(json.choices[0].message.content)
+    parseResponse: (json) => {
+      const choice = json?.choices?.[0];
+      const text = choice?.message?.content || choice?.text || choice?.message?.reasoning_content || "";
+      return parseJsonText(text);
+    }
   },
   openai: {
     endpoint: "https://api.openai.com/v1/chat/completions",
     formatHeaders: (key) => ({
-      "Authorization": `Bearer ${key}`,
+      "Authorization": `Bearer ${key.trim()}`,
       "Content-Type": "application/json"
     }),
     formatBody: (model, systemPrompt, userPrompt) => ({
@@ -99,12 +114,12 @@ const PROVIDER_CONFIGS = {
         }
       }
     }),
-    parseResponse: (json) => parseJsonText(json.choices[0].message.content)
+    parseResponse: (json) => parseJsonText(json?.choices?.[0]?.message?.content || "")
   },
   anthropic: {
     endpoint: "https://api.anthropic.com/v1/messages",
     formatHeaders: (key) => ({
-      "x-api-key": key,
+      "x-api-key": key.trim(),
       "anthropic-version": "2023-06-01",
       "content-type": "application/json"
     }),
@@ -118,7 +133,7 @@ const PROVIDER_CONFIGS = {
       temperature: 0.0,
       top_p: 1.0,
     }),
-    parseResponse: (json) => parseJsonText(json.content[0].text)
+    parseResponse: (json) => parseJsonText(json?.content?.[0]?.text || "")
   },
   gemini: {
     endpoint: (key) => "", 
@@ -137,7 +152,7 @@ const PROVIDER_CONFIGS = {
         responseMimeType: "application/json",
       }
     }),
-    parseResponse: (json) => parseJsonText(json.candidates[0].content.parts[0].text)
+    parseResponse: (json) => parseJsonText(json?.candidates?.[0]?.content?.parts?.[0]?.text || "")
   }
 };
 
@@ -147,36 +162,87 @@ export async function callLLMProvider(providerName, apiKeys, modelName, systemPr
   const provider = PROVIDER_CONFIGS[providerName];
   if (!provider) throw new Error("Unsupported provider: " + providerName);
 
+  if (!apiKeys || apiKeys.length === 0) {
+    throw new Error("No API key provided. Please enter your API key in the extension popup settings.");
+  }
+
+  const MODEL_ALIASES = {
+    "meta/llama-3.3-70b-instruct": "deepseek-ai/deepseek-v4-flash-0731"
+  };
+
+  let rawModel = modelName || "nvidia/nemotron-3-ultra-550b-a55b";
+  const effectiveModel = MODEL_ALIASES[rawModel] || rawModel;
+
   for (let attempt = 0; attempt < apiKeys.length; attempt++) {
     const key = apiKeys[currentKeyIndex];
     
     let endpoint = provider.endpoint;
     if (providerName === "gemini") {
-       endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${key}`;
+       endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${effectiveModel}:generateContent?key=${key.trim()}`;
     }
 
     const headers = provider.formatHeaders(key);
-    const body = provider.formatBody(modelName, systemPrompt, userPrompt);
+    const body = provider.formatBody(effectiveModel, systemPrompt, userPrompt);
 
-    console.log("[Skipera LLM] Sending prompt:", { model: modelName, systemPrompt, userPrompt, body });
+    console.log("[Skipera LLM] Sending prompt:", { model: effectiveModel, systemPrompt, userPrompt, body });
 
     try {
       const response = await fetch(endpoint, {
         method: "POST",
         headers: headers,
-        body: JSON.stringify(body)
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(25000)
       });
 
       if (!response.ok) {
+        const errText = await response.text();
+        console.error(`[Skipera LLM] HTTP ${response.status} from ${endpoint}:`, errText);
         if (response.status === 429 || response.status === 401 || response.status === 402) {
             console.warn(`Key ${currentKeyIndex} failed with ${response.status}. Trying next key...`);
             currentKeyIndex = (currentKeyIndex + 1) % apiKeys.length;
             if (attempt === apiKeys.length - 1) {
-               throw new Error(`API Error ${response.status}: ${await response.text()}`);
+               throw new Error(`API Error ${response.status}: ${errText}`);
             }
             continue; // try next key
         }
-        throw new Error(`API Error ${response.status}: ${await response.text()}`);
+
+        // Resilient fallback for NVIDIA when a specific model is unavailable:
+        // 404 (not deployed), 403, 500, 502/503/504 (gateway), 400 ("DEGRADED function cannot be invoked")
+        if (providerName === "nvidia" && [400, 403, 404, 500, 502, 503, 504].includes(response.status)) {
+          const NVIDIA_FALLBACKS = [
+            "nvidia/nemotron-3-ultra-550b-a55b",
+            "nvidia/nemotron-3-super-120b-a12b",
+            "deepseek-ai/deepseek-v4-pro-0813",
+            "deepseek-ai/deepseek-v4-flash-0731",
+            "nvidia/llama-3.1-nemotron-70b-instruct",
+            "nvidia/nemotron-3.5-lightning-30b-a3b"
+          ];
+          
+          for (const fallbackModel of NVIDIA_FALLBACKS) {
+            if (fallbackModel === effectiveModel) continue;
+            console.warn(`[Skipera LLM] Model failed with ${response.status}. Trying fallback: ${fallbackModel}...`);
+            try {
+              const fallbackBody = provider.formatBody(fallbackModel, systemPrompt, userPrompt);
+              const fallbackRes = await fetch(endpoint, {
+                method: "POST",
+                headers: headers,
+                body: JSON.stringify(fallbackBody),
+                signal: AbortSignal.timeout(25000)
+              });
+              if (fallbackRes.ok) {
+                const fallbackJson = await fallbackRes.json();
+                console.log(`[Skipera LLM] Fallback model ${fallbackModel} succeeded.`);
+                return provider.parseResponse(fallbackJson);
+              } else {
+                console.warn(`[Skipera LLM] Fallback ${fallbackModel} also failed: ${fallbackRes.status}`);
+              }
+            } catch (fallbackErr) {
+              console.error(`[Skipera LLM] Fallback ${fallbackModel} error:`, fallbackErr);
+            }
+          }
+        }
+
+        throw new Error(`API Error ${response.status}: ${errText}`);
       }
 
       const json = await response.json();
