@@ -158,6 +158,10 @@ const PROVIDER_CONFIGS = {
 
 let currentKeyIndex = 0;
 
+// ponytail: nemotron-3-ultra-550b with ~15k context + 8k max_tokens routinely
+// needs 30-60s. Bump if you switch to an even larger default model.
+const LLM_TIMEOUT_MS = 90000;
+
 export async function callLLMProvider(providerName, apiKeys, modelName, systemPrompt, userPrompt) {
   const provider = PROVIDER_CONFIGS[providerName];
   if (!provider) throw new Error("Unsupported provider: " + providerName);
@@ -191,7 +195,7 @@ export async function callLLMProvider(providerName, apiKeys, modelName, systemPr
         method: "POST",
         headers: headers,
         body: JSON.stringify(body),
-        signal: AbortSignal.timeout(25000)
+        signal: AbortSignal.timeout(LLM_TIMEOUT_MS)
       });
 
       if (!response.ok) {
@@ -227,7 +231,7 @@ export async function callLLMProvider(providerName, apiKeys, modelName, systemPr
                 method: "POST",
                 headers: headers,
                 body: JSON.stringify(fallbackBody),
-                signal: AbortSignal.timeout(25000)
+                signal: AbortSignal.timeout(LLM_TIMEOUT_MS)
               });
               if (fallbackRes.ok) {
                 const fallbackJson = await fallbackRes.json();
