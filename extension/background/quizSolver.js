@@ -246,34 +246,37 @@ function resolveQuestionId(ansQId, domainQuestions, responseIndex) {
 }
 
       const domainPromises = Object.entries(domainGroups).map(async ([domain, groupData]) => {
-        let domainQuestions = groupData.questions;
-        let reflection = getReflectionPrompt(domainQuestions);
-        let customPrompt = groupData.agent.buildPrompt(domainQuestions, reflection);
-        
-        const llmResult = await callLLM(domainQuestions, settings, customPrompt, moduleContext);
-        
-        if (!llmResult || !llmResult.responses || llmResult.responses.length === 0) {
-          console.error(`[Skipera Solver] Empty/invalid LLM response for domain ${domain}; its questions fall through to blank fallback.`);
-          return [];
-        }
-        
+        const domainQuestions = groupData.questions;
+        const reflection = getReflectionPrompt(domainQuestions);
         const domainResponses = [];
-        for (let i = 0; i < llmResult.responses.length; i++) {
-          const ans = llmResult.responses[i];
-          const matchedQId = resolveQuestionId(ans.question_id, domainQuestions, i);
-          
-          if (!matchedQId || !domainQuestions[matchedQId]) {
-            console.warn(`[Skipera Solver] Could not resolve question id '${ans.question_id}' to domain questions:`, Object.keys(domainQuestions));
-            continue;
+        const covered = new Set();
+
+        // Turn an LLM result's responses[] into formatted payloads, tracking coverage.
+        const ingest = (llmResult, questionSubset) => {
+          for (let i = 0; i < (llmResult?.responses?.length || 0); i++) {
+            const ans = llmResult.responses[i];
+            const matchedQId = resolveQuestionId(ans.question_id, questionSubset, i);
+            if (!matchedQId || !questionSubset[matchedQId] || covered.has(matchedQId)) {
+              console.warn(`[Skipera Solver] Unresolvable/dup question id '${ans.question_id}' in domain ${domain}`);
+              continue;
+            }
+            const ansType = questionSubset[matchedQId].Type;
+            const agent = getAgentForType(ansType);
+            const { chosen, answer } = agent.postProcess(ansType, ans.chosen, ans.answer, questionSubset, matchedQId);
+            domainResponses.push(agent.formatPayload(matchedQId, ansType, chosen, answer));
+            covered.add(matchedQId);
           }
-          
-          const qObj = domainQuestions[matchedQId];
-          let ansType = qObj.Type;
-          let agent = getAgentForType(ansType);
-          
-          let { chosen, answer } = agent.postProcess(ansType, ans.chosen, ans.answer, domainQuestions, matchedQId);
-          
-          domainResponses.push(agent.formatPayload(matchedQId, ansType, chosen, answer));
+        };
+
+        ingest(await callLLM(domainQuestions, settings, groupData.agent.buildPrompt(domainQuestions, reflection), moduleContext), domainQuestions);
+
+        // Re-ask ONCE for anything the model skipped / truncated / mis-labelled.
+        const missingIds = Object.keys(domainQuestions).filter(id => !covered.has(id));
+        if (missingIds.length > 0) {
+          console.warn(`[Skipera Solver] Domain ${domain}: ${missingIds.length}/${Object.keys(domainQuestions).length} unanswered, re-asking.`);
+          const subset = {};
+          for (const id of missingIds) subset[id] = domainQuestions[id];
+          ingest(await callLLM(subset, settings, groupData.agent.buildPrompt(subset, reflection), moduleContext), subset);
         }
         return domainResponses;
       });
@@ -294,7 +297,7 @@ function resolveQuestionId(ansQId, domainQuestions, responseIndex) {
       const partId = part.partId;
       const qTypeStr = QTYPE_MAP[part.__typename];
       if (qTypeStr && !answeredIds.has(partId)) {
-        console.warn(`[Skipera Solver] LLM did not answer ${partId} (${qTypeStr}). Sending blank fallback response.`);
+        updateProgress(`WARN: no answer for a ${qTypeStr} question after retry — submitting blank`, "error");
         const agent = getAgentForType(qTypeStr);
         try {
           answerResponses.push(agent.formatPayload(partId, qTypeStr, [], ""));
@@ -322,11 +325,17 @@ function resolveQuestionId(ansQId, domainQuestions, responseIndex) {
       input: { courseId, itemId, submissionId: draftId }
     });
 
-    // 5. Wait & Get Feedback
-    await delay(5000);
-    const fbRes = await fetchGraphQL("AssignmentFeedback", ASSIGNMENT_FEEDBACK_QUERY, { courseId, itemId });
-    
-    const feedbackData = fbRes?.data?.SubmissionState?.queryState?.feedback;
+    // 5. Wait & Get Feedback. Coursera's grader lags the submit by a variable
+    // amount; a fixed 5s wait was reading an ungraded response (latestScore 0 ->
+    // "2-3%") and then poisoning questionsData with all-WRONG feedback. Poll until
+    // per-question feedback (parts) actually shows up, up to ~50s.
+    let feedbackData = null;
+    for (let poll = 0; poll < 10; poll++) {
+      await delay(5000);
+      const fbRes = await fetchGraphQL("AssignmentFeedback", ASSIGNMENT_FEEDBACK_QUERY, { courseId, itemId });
+      feedbackData = fbRes?.data?.SubmissionState?.queryState?.feedback || feedbackData;
+      if (feedbackData?.parts?.length > 0) break; // per-question feedback present -> graded
+    }
     if (feedbackData) {
       const outcome = feedbackData.outcome || {};
       const latestScore = outcome.latestScore || 0;

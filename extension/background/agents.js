@@ -31,13 +31,17 @@ export class BaseAgent {
 
   // Combines global rules, skill-specific prompt, and reflection
   buildPrompt(domainQuestions, reflectionText = "") {
+    const ids = Object.keys(domainQuestions || {});
     let basePrompt = (
       "Answer the provided questions. Be precise and concise.\n" +
       "The questions are in a dict format where each key represents the question id, and the value is a JSON dict containing:\n" +
       "- 'Question': the question text.\n" +
       "- 'Options': a list of options (if applicable) with option_id and value.\n" +
       "- 'Type': the question type.\n" +
-      "- 'previous_attempts': (optional) past attempt results. ALWAYS review these to avoid repeating mistakes.\n\n"
+      "- 'previous_attempts': (optional) past attempt results. ALWAYS review these to avoid repeating mistakes.\n\n" +
+      `COVERAGE: there are ${ids.length} question(s). Your 'responses' array MUST contain exactly ${ids.length} entries, one per question, ` +
+      `each with 'question_id' set to the EXACT key from the input. Do not skip, merge, or invent questions. ` +
+      `Answer these ids: ${JSON.stringify(ids)}\n\n`
     );
 
     return basePrompt + this.getGlobalRules() + this.skillPrompt + reflectionText;
