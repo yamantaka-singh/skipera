@@ -171,10 +171,14 @@ export async function callLLMProvider(providerName, apiKeys, modelName, systemPr
   }
 
   const MODEL_ALIASES = {
-    "meta/llama-3.3-70b-instruct": "deepseek-ai/deepseek-v4-flash-0731"
+    "nvidia/nemotron-3-ultra-550b-a55b": "meta/llama-3.3-70b-instruct",
+    "nvidia/nemotron-3-super-120b-a12b": "nvidia/llama-3.1-nemotron-70b-instruct",
+    "nvidia/nemotron-3.5-lightning-30b-a3b": "meta/llama-3.1-8b-instruct",
+    "deepseek-ai/deepseek-v4-flash-0731": "deepseek-ai/deepseek-v3",
+    "deepseek-ai/deepseek-v4-pro-0813": "deepseek-ai/deepseek-r1"
   };
 
-  let rawModel = modelName || "nvidia/nemotron-3-ultra-550b-a55b";
+  let rawModel = modelName || "meta/llama-3.3-70b-instruct";
   const effectiveModel = MODEL_ALIASES[rawModel] || rawModel;
 
   for (let attempt = 0; attempt < apiKeys.length; attempt++) {
@@ -210,22 +214,25 @@ export async function callLLMProvider(providerName, apiKeys, modelName, systemPr
             continue; // try next key
         }
 
-        // Resilient fallback for NVIDIA when a specific model is unavailable:
-        // 404 (not deployed), 403, 500, 502/503/504 (gateway), 400 ("DEGRADED function cannot be invoked")
+        // Resilient fallback for NVIDIA when a specific model is overloaded (503) or unavailable
         if (providerName === "nvidia" && [400, 403, 404, 500, 502, 503, 504].includes(response.status)) {
           const NVIDIA_FALLBACKS = [
-            "nvidia/nemotron-3-ultra-550b-a55b",
-            "nvidia/nemotron-3-super-120b-a12b",
-            "deepseek-ai/deepseek-v4-pro-0813",
-            "deepseek-ai/deepseek-v4-flash-0731",
+            "meta/llama-3.3-70b-instruct",
             "nvidia/llama-3.1-nemotron-70b-instruct",
-            "nvidia/nemotron-3.5-lightning-30b-a3b"
+            "deepseek-ai/deepseek-v3",
+            "deepseek-ai/deepseek-r1",
+            "mistralai/mistral-large-2-instruct",
+            "meta/llama-3.1-8b-instruct"
           ];
           
           for (const fallbackModel of NVIDIA_FALLBACKS) {
             if (fallbackModel === effectiveModel) continue;
-            console.warn(`[Skipera LLM] Model failed with ${response.status}. Trying fallback: ${fallbackModel}...`);
+            console.warn(`[Skipera LLM] Model ${effectiveModel} failed with ${response.status}. Trying fallback: ${fallbackModel}...`);
             try {
+              // Add a short delay if 503 (server overloaded)
+              if (response.status === 503 || response.status === 504) {
+                await new Promise((r) => setTimeout(r, 1200));
+              }
               const fallbackBody = provider.formatBody(fallbackModel, systemPrompt, userPrompt);
               const fallbackRes = await fetch(endpoint, {
                 method: "POST",

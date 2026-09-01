@@ -8,10 +8,12 @@ import Dashboard from './components/Dashboard';
 
 const modelOptions = {
   nvidia: [
-    "nvidia/nemotron-3-ultra-550b-a55b",
-    "nvidia/nemotron-3-super-120b-a12b",
-    "deepseek-ai/deepseek-v4-flash-0731",
-    "nvidia/nemotron-3.5-lightning-30b-a3b"
+    "meta/llama-3.3-70b-instruct",
+    "nvidia/llama-3.1-nemotron-70b-instruct",
+    "deepseek-ai/deepseek-v3",
+    "deepseek-ai/deepseek-r1",
+    "mistralai/mistral-large-2-instruct",
+    "meta/llama-3.1-8b-instruct"
   ],
   openai: [
     "gpt-4o-mini",
@@ -22,21 +24,21 @@ const modelOptions = {
   anthropic: [
     "claude-3-5-sonnet-20241022",
     "claude-3-5-haiku-20241022",
-    "claude-3-haiku-20240307"
+    "claude-3-7-sonnet-20250219"
   ],
   gemini: [
+    "gemini-2.0-flash",
     "gemini-1.5-flash",
     "gemini-1.5-pro",
-    "gemini-2.0-flash",
     "gemini-2.0-flash-lite"
   ]
 };
 
 const defaultModels = {
-  nvidia: "nvidia/nemotron-3-ultra-550b-a55b",
+  nvidia: "meta/llama-3.3-70b-instruct",
   openai: "gpt-4o-mini",
   anthropic: "claude-3-5-sonnet-20241022",
-  gemini: "gemini-1.5-flash"
+  gemini: "gemini-2.0-flash"
 };
 
 export default function App() {
