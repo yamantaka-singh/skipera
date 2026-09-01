@@ -171,14 +171,11 @@ export async function callLLMProvider(providerName, apiKeys, modelName, systemPr
   }
 
   const MODEL_ALIASES = {
-    "nvidia/nemotron-3-ultra-550b-a55b": "meta/llama-3.3-70b-instruct",
-    "nvidia/nemotron-3-super-120b-a12b": "nvidia/llama-3.1-nemotron-70b-instruct",
-    "nvidia/nemotron-3.5-lightning-30b-a3b": "meta/llama-3.1-8b-instruct",
-    "deepseek-ai/deepseek-v4-flash-0731": "deepseek-ai/deepseek-v3",
-    "deepseek-ai/deepseek-v4-pro-0813": "deepseek-ai/deepseek-r1"
+    "deepseek-ai/deepseek-v4-flash-0731": "nvidia/nemotron-3.5-lightning-30b-a3b",
+    "deepseek-ai/deepseek-v4-pro-0813": "nvidia/nemotron-3-super-120b-a12b"
   };
 
-  let rawModel = modelName || "meta/llama-3.3-70b-instruct";
+  let rawModel = modelName || "nvidia/nemotron-3-ultra-550b-a55b";
   const effectiveModel = MODEL_ALIASES[rawModel] || rawModel;
 
   for (let attempt = 0; attempt < apiKeys.length; attempt++) {
@@ -217,12 +214,12 @@ export async function callLLMProvider(providerName, apiKeys, modelName, systemPr
         // Resilient fallback for NVIDIA when a specific model is overloaded (503) or unavailable
         if (providerName === "nvidia" && [400, 403, 404, 500, 502, 503, 504].includes(response.status)) {
           const NVIDIA_FALLBACKS = [
-            "meta/llama-3.3-70b-instruct",
+            "nvidia/nemotron-3.5-lightning-30b-a3b",
+            "nvidia/nemotron-3-ultra-550b-a55b",
+            "nvidia/nemotron-3-super-120b-a12b",
             "nvidia/llama-3.1-nemotron-70b-instruct",
-            "deepseek-ai/deepseek-v3",
-            "deepseek-ai/deepseek-r1",
-            "mistralai/mistral-large-2-instruct",
-            "meta/llama-3.1-8b-instruct"
+            "meta/llama-3.3-70b-instruct",
+            "deepseek-ai/deepseek-v3"
           ];
           
           for (const fallbackModel of NVIDIA_FALLBACKS) {
