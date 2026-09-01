@@ -325,13 +325,14 @@ function resolveQuestionId(ansQId, domainQuestions, responseIndex) {
       input: { courseId, itemId, submissionId: draftId }
     });
 
-    // 5. Wait & Get Feedback. Coursera's grader lags the submit by a variable
-    // amount; a fixed 5s wait was reading an ungraded response (latestScore 0 ->
-    // "2-3%") and then poisoning questionsData with all-WRONG feedback. Poll until
-    // per-question feedback (parts) actually shows up, up to ~50s.
+    // 5. Wait & Get Feedback. Coursera's grader lags the submit; a fixed 5s wait
+    // read an ungraded response ("2-3%") and poisoned questionsData with all-WRONG
+    // feedback. Poll until per-question feedback (parts) shows up. Ramp the delays:
+    // auto-graded MCQ is usually ready in 2-4s, so check fast first (~28s ceiling).
+    const POLL_DELAYS = [2000, 2000, 3000, 4000, 5000, 6000, 6000];
     let feedbackData = null;
-    for (let poll = 0; poll < 10; poll++) {
-      await delay(5000);
+    for (const d of POLL_DELAYS) {
+      await delay(d);
       const fbRes = await fetchGraphQL("AssignmentFeedback", ASSIGNMENT_FEEDBACK_QUERY, { courseId, itemId });
       feedbackData = fbRes?.data?.SubmissionState?.queryState?.feedback || feedbackData;
       if (feedbackData?.parts?.length > 0) break; // per-question feedback present -> graded

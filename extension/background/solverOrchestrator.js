@@ -200,7 +200,7 @@ export async function runFullCourse(courseSlug, settings, tabId) {
           }
         });
         
-        await delay(500);
+        await delay(200);
         continue;
       }
 
@@ -230,7 +230,7 @@ export async function runFullCourse(courseSlug, settings, tabId) {
           updateProgress(`Failed to process item ${item.name}: ${e.message}`, "error");
           skippedItems.add(item.id);
         }
-        await delay(500);
+        await delay(200);
         continue;
       }
 

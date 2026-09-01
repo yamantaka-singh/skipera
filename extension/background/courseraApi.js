@@ -271,8 +271,8 @@ export function isPracticeItem(item, materials) {
 /**
  * Fetches lightweight context (readings) from the current module to inject into the LLM prompt.
  */
-const PER_ITEM_CHARS = 3000;
-const TOTAL_CTX_CHARS = 15000;
+const PER_ITEM_CHARS = 2500;
+const TOTAL_CTX_CHARS = 10000; // ponytail: bigger = better recall but slower LLM prefill; 10k is the sweet spot
 const _moduleContextCache = new Map(); // moduleKey -> built context string
 
 async function fetchSupplementText(courseId, itemId) {
