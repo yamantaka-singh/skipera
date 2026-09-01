@@ -175,7 +175,7 @@ export async function callLLMProvider(providerName, apiKeys, modelName, systemPr
     "deepseek-ai/deepseek-v4-pro-0813": "nvidia/nemotron-3-super-120b-a12b"
   };
 
-  let rawModel = modelName || "nvidia/nemotron-3-ultra-550b-a55b";
+  let rawModel = modelName || "nvidia/nemotron-3-super-120b-a12b";
   const effectiveModel = MODEL_ALIASES[rawModel] || rawModel;
 
   let overloadRetries = 0; // 503/529: wait and retry the SAME model, don't switch

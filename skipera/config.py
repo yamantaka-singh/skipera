@@ -24,7 +24,7 @@ DEFAULT_CONFIG = {
     "nvidia_api_key": [],
     "anthropic_api_key": [],
     "openai_model": "gpt-4o",
-    "nvidia_model": "nvidia/nemotron-3-ultra-550b-a55b",
+    "nvidia_model": "nvidia/nemotron-3-super-120b-a12b",
     "anthropic_model": "claude-3-5-sonnet-latest",
     "file_upload_url": "",
     "skip_practice": False,

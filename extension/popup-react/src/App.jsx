@@ -8,9 +8,9 @@ import Dashboard from './components/Dashboard';
 
 const modelOptions = {
   nvidia: [
+    "nvidia/nemotron-3-super-120b-a12b",
     "nvidia/nemotron-3-ultra-550b-a55b",
     "nvidia/nemotron-3.5-lightning-30b-a3b",
-    "nvidia/nemotron-3-super-120b-a12b",
     "nvidia/llama-3.1-nemotron-70b-instruct",
     "meta/llama-3.3-70b-instruct",
     "deepseek-ai/deepseek-v3"
@@ -35,7 +35,7 @@ const modelOptions = {
 };
 
 const defaultModels = {
-  nvidia: "nvidia/nemotron-3-ultra-550b-a55b",
+  nvidia: "nvidia/nemotron-3-super-120b-a12b",
   openai: "gpt-4o-mini",
   anthropic: "claude-3-5-sonnet-20241022",
   gemini: "gemini-2.0-flash"
@@ -46,7 +46,7 @@ export default function App() {
   const [modelName, setModelName] = useState(defaultModels.nvidia);
   const [apiKey, setApiKey] = useState('');
   const [solveMode, setSolveMode] = useState('full'); // 'full' | 'graded' | 'videos'
-  const [skipPractice, setSkipPractice] = useState(true);
+  const [skipPractice, setSkipPractice] = useState(false);
   const [targetGrade, setTargetGrade] = useState(80); // percent
   const [status, setStatus] = useState({ text: 'Ready', state: 'idle' });
   const [theme, setTheme] = useState('theme-earth'); // Default theme
