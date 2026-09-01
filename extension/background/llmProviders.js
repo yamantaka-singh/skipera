@@ -178,6 +178,8 @@ export async function callLLMProvider(providerName, apiKeys, modelName, systemPr
   let rawModel = modelName || "nvidia/nemotron-3-ultra-550b-a55b";
   const effectiveModel = MODEL_ALIASES[rawModel] || rawModel;
 
+  let overloadRetries = 0; // 503/529: wait and retry the SAME model, don't switch
+
   for (let attempt = 0; attempt < apiKeys.length; attempt++) {
     const key = apiKeys[currentKeyIndex];
     
@@ -202,6 +204,17 @@ export async function callLLMProvider(providerName, apiKeys, modelName, systemPr
       if (!response.ok) {
         const errText = await response.text();
         console.error(`[Skipera LLM] HTTP ${response.status} from ${endpoint}:`, errText);
+
+        // Backend overloaded -> switching models won't help. Wait and retry the
+        // same model up to 3x (3s, 9s, 20s) before falling through.
+        if ((response.status === 503 || response.status === 529) && overloadRetries < 3) {
+          const wait = [3000, 9000, 20000][overloadRetries++];
+          console.warn(`[Skipera LLM] ${response.status} overloaded; retry ${overloadRetries}/3 in ${wait}ms`);
+          await new Promise((r) => setTimeout(r, wait));
+          attempt--; // don't consume a key slot
+          continue;
+        }
+
         if (response.status === 429 || response.status === 401 || response.status === 402) {
             console.warn(`Key ${currentKeyIndex} failed with ${response.status}. Trying next key...`);
             currentKeyIndex = (currentKeyIndex + 1) % apiKeys.length;
